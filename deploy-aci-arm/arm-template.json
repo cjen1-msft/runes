@@ -75,7 +75,7 @@
               "command": [
                 "/bin/sh",
                 "-c",
-                "mkdir -p /root/.ssh/ && apt update -y && apt install -y openssh-server && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && service ssh start && tail -f /dev/null"
+                "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && apt update -y && apt install -y openssh-server && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && service ssh start && tail -f /dev/null"
               ],
               "ports": [
                 {

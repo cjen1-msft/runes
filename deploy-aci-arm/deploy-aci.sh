@@ -11,7 +11,6 @@ ACRPrefix="$(echo $ImageFQN | sed 's/\.azurecr\.io.*//')"
 DeploymentName="$(echo "${ResourceGroup}-${ImageTitle}" | sed 's/_/-/g')"
 
 ## Build primary container
-#docker build -t $ImageName --build-arg HUGGINGFACE_TOKEN=$HUGGINGFACE_TOKEN .
 docker login \
   -u 00000000-0000-0000-0000-000000000000 \
   -p $(az acr login --name ${ACRPrefix} --expose-token --output tsv --query accessToken) \

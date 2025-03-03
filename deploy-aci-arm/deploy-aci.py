@@ -1,0 +1,64 @@
+import argparse
+import sys
+import os
+
+from subprocess import run, PIPE
+
+def image_is_available(image):
+    rc = run("docker manifest inspect {}".format(image), shell=True, stdout=False, stderr=False)
+    return rc.returncode == 0
+
+def get_ssh_key(ssh_key):
+    with open(os.path.expanduser(ssh_key), "r") as f:
+        return f.read().strip()
+
+def run_aci_public_image(args):
+    az_cmd = " ".join([
+        "az deployment group create",
+        f"--resource-group \"{args.resource_group}\"",
+        "--template-file public-template.json",
+        f"--parameters image=\"{args.image}\"",
+        f"--parameters ssh=\"{get_ssh_key(args.ssh_key)}\"",
+        f"--parameters name=\"{args.name}\""
+    ])
+    print("Running:")
+    print(az_cmd)
+    run(az_cmd, shell=True, check=True, stdout=sys.stderr, stderr=sys.stderr)
+
+def run_aci_private_image(args):
+   acr = args.image.split(".azurecr.io")[0]
+   acr_token = run(f"az acr login --name {acr} --expose-token --output tsv --query accessToken", shell=True, check=True, stdout=PIPE).stdout.strip().decode("utf-8")
+   az_cmd = " ".join([
+       "az deployment group create",
+       f"--resource-group {args.resource_group}",
+       "--template-file private-template.json",
+       f"--parameters image=\"{args.image}\"",
+       f"--parameters ssh=\"{get_ssh_key(args.ssh_key)}\"",
+       f"--parameters name=\"{args.name}\"",
+       f"--parameters acr=\"{acr}\"",
+       f"--parameters acr_token=\"{acr_token}\""
+   ])
+   print("Running:")
+   print(az_cmd)
+   run(az_cmd, shell=True, check=True, stdout=sys.stderr, stderr=sys.stderr)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Start up a ACI container using the suppplied image")
+    parser.add_argument("--image", help="The image to use for the container", required=True)
+    parser.add_argument("--resource_group", help="The resource group to use for the container", required=True)
+    parser.add_argument("--ssh_key", help="The ssh key to use for the container", default="~/.ssh/id_rsa.pub")
+    parser.add_argument("--name", help="The name to use for the container", default=None)
+    args = parser.parse_args()
+
+    if args.name is None:
+      args.name = "TEST"
+
+    if image_is_available(args.image):
+      print(f"Image {args.image} is public")
+      run_aci_public_image(args)
+    else:
+       print(f"Image {args.image} is private")
+       run_aci_private_image(args)
+
+    run(f"az container show --resource-group {args.resource_group} --name {args.name} --query ipAddress.ip", shell=True, stdout=sys.stdout, stderr=sys.stderr)
+

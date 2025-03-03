@@ -75,7 +75,7 @@
               "command": [
                 "/bin/sh",
                 "-c",
-                "mkdir -p /root/.ssh/ && sudo apt update -y && sudo apt install openssh-server && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && service ssh start && tail -f /dev/null"
+                "mkdir -p /root/.ssh/ && apt update -y && apt install -y openssh-server && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && service ssh start && tail -f /dev/null"
               ],
               "ports": [
                 {

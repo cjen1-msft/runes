@@ -44,16 +44,16 @@ def run_aci_private_image(args):
    print(az_cmd)
    run(az_cmd, shell=True, check=True, stdout=sys.stderr, stderr=sys.stderr)
 
+def default_container_name():
+    return f"{os.getlogin()}-test-{os.urandom(2).hex()}"
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start up a ACI container using the suppplied image")
     parser.add_argument("--image", help="The image to use for the container", required=True)
-    parser.add_argument("--resource_group", help="The resource group to use for the container", required=True)
-    parser.add_argument("--ssh_key", help="The ssh key to use for the container", default="~/.ssh/id_rsa.pub")
-    parser.add_argument("--name", help="The name to use for the container", default=None)
+    parser.add_argument("--resource-group", help="The resource group to use for the container", required=True)
+    parser.add_argument("--ssh-key", help="The ssh key to use for the container", default="~/.ssh/id_rsa.pub")
+    parser.add_argument("--name", help="The name to use for the container", default=default_container_name())
     args = parser.parse_args()
-
-    if args.name is None:
-      args.name = "TEST"
 
     if image_is_available(args.image):
       print(f"Image {args.image} is public")

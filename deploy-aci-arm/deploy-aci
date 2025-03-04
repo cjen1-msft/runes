@@ -22,20 +22,12 @@ def get_ssh_key(ssh_key):
 
 def run_aci_public_image(args):
     az_cmd = [
-        "az",
-        "deployment",
-        "group",
-        "create",
-        "--resource-group",
-        args.resource_group,
-        "--template-file",
-        "public-template.json",
-        "--parameters",
-        f"image={args.image}",
-        "--parameters",
-        f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters",
-        f"name={args.name}",
+        "az", "deployment", "group", "create",
+        "--resource-group", args.resource_group,
+        "--template-file", "public-template.json",
+        "--parameters", f"image={args.image}",
+        "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
+        "--parameters", f"name={args.name}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))
@@ -44,20 +36,17 @@ def run_aci_public_image(args):
 
 def run_aci_private_image(args):
     acr = args.image.split(".azurecr.io")[0]
+    acr_token_cmd =[
+        "az", "acr", "login",
+        "--name", acr,
+        "--expose-token",
+        "--output", "tsv",
+        "--query", "accessToken",
+    ]
+     
     acr_token = (
         run(
-            [
-                "az",
-                "acr",
-                "login",
-                "--name",
-                acr,
-                "--expose-token",
-                "--output",
-                "tsv",
-                "--query",
-                "accessToken",
-            ],
+            acr_token_cmd,
             check=True,
             stdout=PIPE,
         )
@@ -65,21 +54,14 @@ def run_aci_private_image(args):
         .decode("utf-8")
     )
     az_cmd = [
-        "az deployment group create",
-        "--resource-group",
-        "args.resource_group",
-        "--template-file",
-        "private-template.json",
-        "--parameters",
-        f"image={args.image}",
-        "--parameters",
-        f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters",
-        f"name={args.name}",
-        "--parameters",
-        f"acr={acr}",
-        "--parameters",
-        f"acr_token={acr_token}",
+        "az", "deployment", "group", "create",
+        "--resource-group", "args.resource_group",
+        "--template-file", "private-template.json",
+        "--parameters", f"image={args.image}",
+        "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
+        "--parameters", f"name={args.name}",
+        "--parameters", f"acr={acr}",
+        "--parameters", f"acr_token={acr_token}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))

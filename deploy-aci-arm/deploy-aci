@@ -122,8 +122,15 @@ if __name__ == "__main__":
         run_aci_private_image(args)
 
     run(
-        f"az container show --resource-group {args.resource_group} --name {args.name} --query ipAddress.ip",
-        shell=True,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
+        [
+            "az",
+            "container",
+            "show",
+            "--resource-group",
+            args.resource_group,
+            "--name",
+            args.name,
+            "--query",
+            "ipAddress.ip",
+        ]
     )

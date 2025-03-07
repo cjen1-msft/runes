@@ -60,8 +60,8 @@ def run_aci_private_image(args):
         "--parameters", f"image={args.image}",
         "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
         "--parameters", f"name={args.name}",
-        "--parameters", f"acr={acr}",
-        "--parameters", f"acr_token={acr_token}",
+        "--parameters", f"acr-repo={acr}",
+        "--parameters", f"acr-token={acr_token}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))

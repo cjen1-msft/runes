@@ -73,8 +73,8 @@
               "volumeMounts": [],
               "resources": {
                 "requests": {
-                  "memoryInGB": 16,
-                  "cpu": 4
+                  "memoryInGB": 32,
+                  "cpu": 16
                 }
               }
             }

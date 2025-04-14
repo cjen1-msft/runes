@@ -7,6 +7,7 @@ import shlex
 
 from subprocess import run, PIPE
 
+from enum import Enum
 
 def image_is_available(image):
     rc = run(
@@ -24,7 +25,7 @@ def run_aci_public_image(args):
     az_cmd = [
         "az", "deployment", "group", "create",
         "--resource-group", args.resource_group,
-        "--template-file", "public-template.json",
+        "--template-file", f"{args.image_type}/public-template.json",
         "--parameters", f"image={args.image}",
         "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
         "--parameters", f"name={args.name}",
@@ -56,7 +57,7 @@ def run_aci_private_image(args):
     az_cmd = [
         "az", "deployment", "group", "create",
         "--resource-group", args.resource_group,
-        "--template-file", "private-template.json",
+        "--template-file", f"{args.image_type}/private-template.json",
         "--parameters", f"image={args.image}",
         "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
         "--parameters", f"name={args.name}",
@@ -69,7 +70,7 @@ def run_aci_private_image(args):
 
 
 def default_container_name():
-    return f"{os.getlogin()}-test-{os.urandom(2).hex()}"
+    return f"test-{os.urandom(2).hex()}"
 
 
 if __name__ == "__main__":
@@ -94,6 +95,14 @@ if __name__ == "__main__":
         help="The name to use for the container",
         default=default_container_name(),
     )
+
+    parser.add_argument(
+        "--image-type",
+        help="The type of image",
+        choices=["ubuntu", "azure-linux"],
+        default="azure-linux",
+    )
+
     args = parser.parse_args()
 
     if image_is_available(args.image):

@@ -9,19 +9,13 @@ from subprocess import run, PIPE
 
 from enum import Enum
 
-def image_is_available(image):
-    rc = run(
-        ["docker", "manifest", "inspect", f"{image}".format(image)], capture_output=True
-    )
-    return rc.returncode == 0
-
-
 def get_ssh_key(ssh_key):
     with open(os.path.expanduser(ssh_key), "r") as f:
         return f.read().strip()
 
 
 def run_aci_public_image(args):
+    print("Using public template")
     az_cmd = [
         "az", "deployment", "group", "create",
         "--resource-group", args.resource_group,
@@ -35,7 +29,8 @@ def run_aci_public_image(args):
     run(az_cmd, check=True)
 
 
-def run_aci_private_image(args):
+def run_aci_azure_image(args):
+    print("Using azure auth template")
     acr = args.image.split(".azurecr.io")[0]
     acr_token_cmd =[
         "az", "acr", "login",
@@ -81,6 +76,9 @@ if __name__ == "__main__":
         "--image", help="The image to use for the container", required=True
     )
     parser.add_argument(
+        "--azure-auth", help="Use az command to do authentication", action="store_true"
+    )
+    parser.add_argument(
         "--resource-group",
         help="The resource group to use for the container",
         required=True,
@@ -105,12 +103,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if image_is_available(args.image):
-        print(f"Image {args.image} is public")
-        run_aci_public_image(args)
+    if args.azure_auth:
+        run_aci_azure_image(args)
     else:
-        print(f"Image {args.image} is private")
-        run_aci_private_image(args)
+        run_aci_public_image(args)
 
     run(
         [

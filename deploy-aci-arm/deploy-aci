@@ -23,6 +23,7 @@ def run_aci_public_image(args):
         "--parameters", f"image={args.image}",
         "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
         "--parameters", f"name={args.name}",
+        "--parameters", f"region={args.region}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))
@@ -58,6 +59,7 @@ def run_aci_azure_image(args):
         "--parameters", f"name={args.name}",
         "--parameters", f"acr-repo={acr}",
         "--parameters", f"acr-token={acr_token}",
+        "--parameters", f"region={args.region}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))
@@ -99,6 +101,12 @@ if __name__ == "__main__":
         help="The type of image",
         choices=["ubuntu", "azure-linux"],
         default="azure-linux",
+    )
+
+    parser.add_argument(
+        "--region",
+        help="The region to use for the container",
+        default="northeurope",
     )
 
     args = parser.parse_args()

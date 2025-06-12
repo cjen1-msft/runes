@@ -26,6 +26,13 @@
         "description": "Access token for ACR if necessary"
       }
     },
+    "region": {
+      "type": "string",
+      "defaultValue": "North Europe",
+      "metadata": {
+        "description": "Region to deploy the container group"
+      }
+    },
     "image": {
       "type": "string",
       "metadata": {
@@ -39,7 +46,7 @@
       "type": "Microsoft.ContainerInstance/containerGroups",
       "apiVersion": "2022-10-01-preview",
       "name": "[parameters('name')]",
-      "location": "North Europe",
+      "location": "[parameters('region')]",
       "identity": {
         "type": "SystemAssigned"
       },
@@ -92,8 +99,8 @@
               "volumeMounts": [],
               "resources": {
                 "requests": {
-                  "memoryInGB": 32,
-                  "cpu": 16
+                  "memoryInGB": 8,
+                  "cpu": 4
                 }
               }
             }

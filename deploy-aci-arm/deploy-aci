@@ -60,6 +60,8 @@ def run_aci_azure_image(args):
         "--parameters", f"acr-repo={acr}",
         "--parameters", f"acr-token={acr_token}",
         "--parameters", f"region={args.region}",
+        "--parameters", f"ram={args.ram}",
+        "--parameters", f"cpus={args.cpus}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))
@@ -108,6 +110,21 @@ if __name__ == "__main__":
         help="The region to use for the container",
         default="northeurope",
     )
+
+    parser.add_argument(
+        "--cpus",
+        type=int,
+        help="The number of CPUs to allocate to the container",
+        default=4,
+    )
+    
+    parser.add_argument(
+        "--ram",
+        type=int,
+        help="The amount of RAM (GB) to allocate to the container",
+        default=8,
+    )
+
 
     args = parser.parse_args()
 

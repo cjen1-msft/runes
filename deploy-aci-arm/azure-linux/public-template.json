@@ -26,6 +26,20 @@
       "metadata": {
         "description": "Image to deploy"
       }
+    },
+    "cpus": {
+      "type": "int",
+      "defaultValue": 4,
+      "metadata": {
+        "description": "Number of CPUs to allocate for the container group"
+      }
+    },
+    "ram": {
+      "type": "int",
+      "defaultValue": 8,
+      "metadata": {
+        "description": "Number of CPUs to allocate for the container group"
+      }
     }
   },
   "variables": {},
@@ -80,8 +94,8 @@
               "volumeMounts": [],
               "resources": {
                 "requests": {
-                  "memoryInGB": 8,
-                  "cpu":4 
+                  "memoryInGB": "[parameters('ram')]",
+                  "cpu":"[parameters('cpus')]" 
                 }
               }
             }

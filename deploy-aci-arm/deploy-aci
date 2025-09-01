@@ -24,6 +24,8 @@ def run_aci_public_image(args):
         "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
         "--parameters", f"name={args.name}",
         "--parameters", f"region={args.region}",
+        "--parameters", f"ram={args.ram}",
+        "--parameters", f"cpus={args.cpus}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))
@@ -122,7 +124,7 @@ if __name__ == "__main__":
         "--ram",
         type=int,
         help="The amount of RAM (GB) to allocate to the container",
-        default=8,
+        default=16,
     )
 
 

@@ -36,7 +36,7 @@
     },
     "ram": {
       "type": "int",
-      "defaultValue": 8,
+      "defaultValue": 16,
       "metadata": {
         "description": "Number of CPUs to allocate for the container group"
       }

@@ -1,0 +1,82 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "name": {
+            "value": "gha-c-aci-genoa-ci"
+        },
+        "location": {
+            "value": "southcentralus"
+        },
+        "vmProvider": {
+            "value": 3
+        },
+        "sku": {
+            "value": {
+                "type": "AciSku",
+                "name": "containersku",
+                "aciSkuName": "Confidential"
+            }
+        },
+        "buildCaches": {
+            "value": []
+        },
+        "maxPoolSize": {
+            "value": 5
+        },
+        "agentProfile": {
+            "value": {
+                "type": "Stateless",
+                "resourcePredictionsProfile": {
+                    "kind": "Automatic",
+                    "predictionPreference": "Balanced"
+                }
+            }
+        },
+        "vmProviderProperties": {
+            "value": {
+                "VssAdminAccounts": [],
+                "VssAdminGroups": [],
+                "RequestPmeSubscription": "true",
+                "SubscriptionId": "ffa61b03-13a0-4a1b-8cb8-e02fa9bb0b1a",
+                "TenantId": "975f013f-7f24-47e8-a7d3-abc4752bf346",
+                "AcrTenantId": "72f988bf-86f1-41af-91ab-2d7cd011db47"
+            }
+        },
+        "storageProfile": {
+            "value": {
+                "dataDisks": [
+                    {
+                        "diskSizeGiB": 100,
+                        "caching": null,
+                        "storageAccountType": null,
+                        "driveLetter": null
+                    }
+                ]
+            }
+        },
+        "contacts": {
+            "value": [
+                "ccf-sec@microsoft.com"
+            ]
+        },
+        "images": {
+            "value": [
+                {
+                    "subscriptionId": "f482af20-c550-4fa8-84f4-75ce2e2753c9",
+                    "imageName": "ccfci_0.0.1",
+                    "poolBufferPercentage": "*"
+                }
+            ]
+        },
+        "organizationProfile": {
+            "value": {
+                "type": "GitHub",
+                "url": " https://github.com/microsoft/CCF"
+            }
+        },
+        "tags": {
+            "value": {}
+        }
+    }
+}

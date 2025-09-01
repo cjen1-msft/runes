@@ -1,0 +1,66 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "name": {
+            "type": "String"
+        },
+        "location": {
+            "type": "String"
+        },
+        "vmProvider": {
+            "type": "Int"
+        },
+        "sku": {
+            "type": "Object"
+        },
+        "buildCaches": {
+            "type": "Array"
+        },
+        "maxPoolSize": {
+            "type": "Int"
+        },
+        "agentProfile": {
+            "type": "Object"
+        },
+        "vmProviderProperties": {
+            "type": "Object"
+        },
+        "storageProfile": {
+            "type": "Object"
+        },
+        "contacts": {
+            "type": "Array"
+        },
+        "images": {
+            "type": "Array"
+        },
+        "organizationProfile": {
+            "type": "Object"
+        },
+        "tags": {
+            "type": "Object"
+        }
+    },
+    "resources": [
+        {
+            "type": "Microsoft.CloudTest/hostedpools",
+            "apiVersion": "2024-07-05-preview",
+            "name": "[parameters('name')]",
+            "location": "[parameters('location')]",
+            "tags": "[parameters('tags')]",
+            "properties": {
+                "vmProvider": "[parameters('vmProvider')]",
+                "sku": "[parameters('sku')]",
+                "buildCaches": "[parameters('buildCaches')]",
+                "maxPoolSize": "[parameters('maxPoolSize')]",
+                "agentProfile": "[parameters('agentProfile')]",
+                "vmProviderProperties": "[parameters('vmProviderProperties')]",
+                "storageProfile": "[parameters('storageProfile')]",
+                "contacts": "[parameters('contacts')]",
+                "images": "[parameters('images')]",
+                "organizationProfile": "[parameters('organizationProfile')]"
+            }
+        }
+    ]
+}

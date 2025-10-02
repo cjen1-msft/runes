@@ -4,7 +4,7 @@ import argparse
 import sys
 import os
 import shlex
-import azure_linux.template_builder as tb
+import arm_template_builder as tb
 import tempfile
 
 from subprocess import run, PIPE

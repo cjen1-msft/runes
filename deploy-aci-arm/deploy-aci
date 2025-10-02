@@ -76,7 +76,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    deployment = tb.CACIDeployment(
+    deployment = tb.ARMTemplate([tb.CACIDeployment(
         args.name,
         args.region,
         sshkey=get_ssh_key(args.ssh_key),
@@ -88,7 +88,7 @@ if __name__ == "__main__":
                 ram=args.ram,
             )
         ]
-    )
+    )])
 
 
     with tempfile.NamedTemporaryFile() as tempf:

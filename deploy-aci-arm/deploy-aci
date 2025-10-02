@@ -4,6 +4,8 @@ import argparse
 import sys
 import os
 import shlex
+import azure_linux.template_builder as tb
+import tempfile
 
 from subprocess import run, PIPE
 
@@ -12,62 +14,6 @@ from enum import Enum
 def get_ssh_key(ssh_key):
     with open(os.path.expanduser(ssh_key), "r") as f:
         return f.read().strip()
-
-
-def run_aci_public_image(args):
-    print("Using public template")
-    az_cmd = [
-        "az", "deployment", "group", "create",
-        "--resource-group", args.resource_group,
-        "--template-file", f"{args.image_type}/public-template.json",
-        "--parameters", f"image={args.image}",
-        "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters", f"name={args.name}",
-        "--parameters", f"region={args.region}",
-        "--parameters", f"ram={args.ram}",
-        "--parameters", f"cpus={args.cpus}",
-    ]
-    print("Running:")
-    print(shlex.join(az_cmd))
-    run(az_cmd, check=True)
-
-
-def run_aci_azure_image(args):
-    print("Using azure auth template")
-    acr = args.image.split(".azurecr.io")[0]
-    acr_token_cmd =[
-        "az", "acr", "login",
-        "--name", acr,
-        "--expose-token",
-        "--output", "tsv",
-        "--query", "accessToken",
-    ]
-     
-    acr_token = (
-        run(
-            acr_token_cmd,
-            check=True,
-            stdout=PIPE,
-        )
-        .stdout.strip()
-        .decode("utf-8")
-    )
-    az_cmd = [
-        "az", "deployment", "group", "create",
-        "--resource-group", args.resource_group,
-        "--template-file", f"{args.image_type}/private-template.json",
-        "--parameters", f"image={args.image}",
-        "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters", f"name={args.name}",
-        "--parameters", f"acr-repo={acr}",
-        "--parameters", f"acr-token={acr_token}",
-        "--parameters", f"region={args.region}",
-        "--parameters", f"ram={args.ram}",
-        "--parameters", f"cpus={args.cpus}",
-    ]
-    print("Running:")
-    print(shlex.join(az_cmd))
-    run(az_cmd, check=True)
 
 
 def default_container_name():
@@ -130,10 +76,35 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.azure_auth:
-        run_aci_azure_image(args)
-    else:
-        run_aci_public_image(args)
+    deployment = tb.CACIDeployment(
+        args.name,
+        args.region,
+        sshkey=get_ssh_key(args.ssh_key),
+        containers=[
+            tb.CACI(
+                name=f"{args.name}-0",
+                image=args.image,
+                cpu=args.cpus,
+                ram=args.ram,
+            )
+        ]
+    )
+
+
+    with tempfile.NamedTemporaryFile() as tempf:
+        dep_json = deployment.to_json()
+        print(dep_json)
+        tempf.write(dep_json.encode("utf-8"))
+        tempf.flush()
+
+        az_cmd = [
+            "az", "deployment", "group", "create",
+            "--resource-group", args.resource_group,
+            "--template-file", tempf.name,
+        ]
+        print("Running:")
+        print(shlex.join(az_cmd))
+        run(az_cmd, check=True)
 
     run(
         [

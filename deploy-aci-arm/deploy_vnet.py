@@ -1,174 +1,154 @@
 #!/usr/bin/env python3
-"""Deploy an Azure Virtual Network via an ARM template.
+"""Deploy an Azure Virtual Network (VNet) via an ARM template.
 
 Executable usage:
-	python deploy_vnet.py \
-		--resource-group my-rg \
-		--location northeurope \
-		--vnet-name myVnet \
-		--subnet-name aci-subnet \
-		--address-prefix 10.42.0.0/16 \
-		--subnet-prefix 10.42.1.0/24
+	python deploy_vnet.py --resource-group <rg> [--name myvnet] \
+		[--region northeurope] [--address-space 10.1.0.0/16] \
+		[--subnet default:10.1.0.0/24 --subnet workload:10.1.1.0/24]
 
 Library usage:
 	from deploy_vnet import deploy_vnet
-	vnet_info = deploy_vnet(
-		resource_group="my-rg",
-		location="northeurope",
-		vnet_name="myVnet",
-		subnet_name="aci-subnet",
-		address_prefix="10.42.0.0/16",
-		subnet_prefix="10.42.1.0/24",
-	)
-	print(vnet_info["subnet_id"])  # Use for ACI subnetIds
+	vnet_name = deploy_vnet(resource_group="my-rg")
 
-Returns a dict: { 'vnet_name', 'subnet_name', 'subscription_id', 'subnet_id' }.
-
-Assumptions:
-  - Azure CLI (az) is installed and logged-in.
-  - Caller has rights to deploy at resource group scope.
+The deploy_vnet function returns the VNet name so callers can chain operations.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
-import sys
+import os
+import random
+import string
 import tempfile
-from pathlib import Path
-from typing import Dict
+from subprocess import run, PIPE
+import shlex
+from typing import List, Dict
 
-from arm_template_builder import VNetDeployment, SubnetSpec
-
-
-def _run(cmd: list[str]) -> str:
-    """Run a CLI command and return stdout, raising on failure."""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"Command failed: {' '.join(cmd)}\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}"
-        )
-    return proc.stdout.strip()
+import arm_template_builder as tb
 
 
-def build_vnet_template(
-    vnet_name: str,
-    location: str,
-    address_prefix: str,
-    subnet_name: str,
-    subnet_prefix: str,
-):
-    vnet = VNetDeployment(
-        name=vnet_name,
-        location=location,
-        address_space=[address_prefix],
-        subnets=[SubnetSpec(subnet_name, subnet_prefix)],
-    )
-    return vnet.to_dict()
+def _random_suffix(n: int = 5) -> str:
+	return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(n))
+
+
+def default_vnet_name() -> str:
+	return f"vnet-{_random_suffix()}"
+
+
+def parse_subnet_args(values: List[str]) -> List[Dict[str, str]]:
+	"""Parse --subnet arguments of the form name:CIDR.
+
+	Example: ["default:10.0.0.0/24", "workload:10.0.1.0/24"]
+	Returns list of {"name": name, "addressPrefix": cidr}
+	"""
+	subnets = []
+	for v in values:
+		if ':' not in v:
+			raise ValueError(f"Invalid subnet specification '{v}'. Use name:CIDR")
+		name, cidr = v.split(':', 1)
+		subnets.append({"name": name, "addressPrefix": cidr})
+	return subnets
+
+
+def _default_subnet_from_space(address_space: str) -> List[Dict[str, str]]:
+	# Naive derivation: if /16 -> replace with /24 for first subnet. Otherwise reuse.
+	if address_space.endswith('/16'):
+		base = address_space.rsplit('.', 2)[0]  # crude but acceptable: '10.0'
+		subnet_cidr = address_space.split('/')[0].rsplit('.', 1)[0] + '.0.0/24'
+		# Actually above might mis-handle; simpler: just replace trailing '/16' with '/24'
+		subnet_cidr = address_space.replace('/16', '/24')
+	else:
+		subnet_cidr = address_space
+	return [{"name": "default", "addressPrefix": subnet_cidr}]
 
 
 def deploy_vnet(
-    resource_group: str,
-    location: str,
-    vnet_name: str,
-    subnet_name: str,
-    address_prefix: str = "10.10.0.0/16",
-    subnet_prefix: str = "10.10.1.0/24",
-    quiet: bool = False,
-) -> Dict[str, str]:
-    """Deploy the VNet and return identifiers.
+	resource_group: str,
+	name: str | None = None,
+	region: str = "northeurope",
+	address_space: str = "10.0.0.0/16",
+	subnets: List[Dict[str, str]] | None = None,
+	azure_auth: bool = False,
+) -> str:
+	"""Deploy a VNet and return its name.
 
-    Uses an ephemeral ARM template file and az deployment group create.
-    """
-    template = build_vnet_template(
-        vnet_name=vnet_name,
-        location=location,
-        address_prefix=address_prefix,
-        subnet_name=subnet_name,
-        subnet_prefix=subnet_prefix,
-    )
-    with tempfile.TemporaryDirectory() as td:
-        tmp_path = Path(td) / "vnet-template.json"
-        tmp_path.write_text(json.dumps(template, indent=2))
-        if not quiet:
-            print(
-                f"Deploying VNet '{vnet_name}' to resource group '{resource_group}'..."
-            )
-        cmd = [
-            "az",
-            "deployment",
-            "group",
-            "create",
-            "--resource-group",
-            resource_group,
-            "--template-file",
-            str(tmp_path),
-            "--parameters",
-            f"location={location}",  # location is embedded but harmless to pass
-            "-o",
-            "none",
-        ]
-        # We ignore output by specifying -o none for cleaner display.
-        _run(cmd)
+	Parameters mirror CLI flags. If subnets is None a single default subnet is created.
+	"""
+	vnet_name = name or default_vnet_name()
+	if subnets is None or len(subnets) == 0:
+		subnets = _default_subnet_from_space(address_space)
 
-    subscription_id = _run(["az", "account", "show", "--query", "id", "-o", "tsv"])
-    subnet_id = (
-        f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/"
-        f"providers/Microsoft.Network/virtualNetworks/{vnet_name}/subnets/{subnet_name}"
-    )
-    result = {
-        "vnet_name": vnet_name,
-        "subnet_name": subnet_name,
-        "subscription_id": subscription_id,
-        "subnet_id": subnet_id,
-    }
-    if not quiet:
-        print(json.dumps(result, indent=2))
-    return result
+	# Optional auth step (simple placeholder - avoids adding magic if already logged in)
+	if azure_auth:
+		run(["az", "account", "show"], check=False, stdout=PIPE, stderr=PIPE)
+
+	template = tb.ARMTemplate([
+		tb.ResourceVNet(
+			name=vnet_name,
+			region=region,
+			address_space=address_space,
+			subnets=subnets,
+		)
+	])
+
+	with tempfile.NamedTemporaryFile(mode="w", delete=False) as tf:
+		tf.write(template.to_json())
+		tf.flush()
+		template_file = tf.name
+
+    az_cmd = [
+      "az",
+      "deployment",
+      "group",
+      "create",
+      "--resource-group",
+      resource_group,
+      "--template-file",
+      tf.name,
+    ]
+	print("Running:")
+	print(shlex.join(az_cmd))
+	run(az_cmd, check=True)
+
+	# No direct output required; return the name for programmatic usage.
+	return vnet_name
 
 
-def parse_args(argv):
-    ap = argparse.ArgumentParser(description="Deploy an Azure VNet (ARM template)")
-    ap.add_argument("--resource-group", "-g", required=True)
-    ap.add_argument("--location", "-l", required=True, help="Azure region")
-    ap.add_argument("--vnet-name", required=True)
-    ap.add_argument("--subnet-name", required=True)
-    ap.add_argument(
-        "--address-prefix",
-        default="10.10.0.0/16",
-        help="CIDR for VNet address space (default: 10.10.0.0/16)",
-    )
-    ap.add_argument(
-        "--subnet-prefix",
-        default="10.10.1.0/24",
-        help="CIDR for subnet (default: 10.10.1.0/24)",
-    )
-    ap.add_argument(
-        "--quiet", action="store_true", help="Suppress progress / pretty output"
-    )
-    return ap.parse_args(argv)
+def main():
+	parser = argparse.ArgumentParser(description="Deploy an Azure VNet via ARM template.")
+	parser.add_argument("--resource-group", required=True, help="Resource group for the deployment")
+	parser.add_argument("--name", help="Name of the VNet (auto-generated if omitted)")
+	parser.add_argument("--region", default="northeurope", help="Azure region")
+	parser.add_argument("--address-space", default="10.0.0.0/16", help="VNet address space CIDR")
+	parser.add_argument(
+		"--subnet",
+		action="append",
+		dest="subnets",
+		help="Subnet specification name:CIDR (can be repeated)",
+	)
+	parser.add_argument(
+		"--azure-auth",
+		action="store_true",
+		help="Attempt an az account show to ensure CLI context (no-op if already logged in)",
+	)
+
+	args = parser.parse_args()
+
+	if args.subnets:
+		subnets = parse_subnet_args(args.subnets)
+	else:
+		subnets = None
+
+	vnet_name = deploy_vnet(
+		resource_group=args.resource_group,
+		name=args.name,
+		region=args.region,
+		address_space=args.address_space,
+		subnets=subnets,
+		azure_auth=args.azure_auth,
+	)
+	print(f"VNET_NAME={vnet_name}")
 
 
-def main(argv=None):
-    args = parse_args(argv or sys.argv[1:])
-    deploy_vnet(
-        resource_group=args.resource_group,
-        location=args.location,
-        vnet_name=args.vnet_name,
-        subnet_name=args.subnet_name,
-        address_prefix=args.address_prefix,
-        subnet_prefix=args.subnet_prefix,
-        quiet=args.quiet,
-    )
-
-
-if __name__ == "__main__":  # pragma: no cover
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("Interrupted", file=sys.stderr)
-        sys.exit(130)
-    except Exception as exc:  # noqa: BLE001 - show a concise error
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+if __name__ == "__main__":
+	main()

@@ -119,3 +119,37 @@ class ARMTemplate:
 
     def to_json(self):
         return json.dumps(self.to_dict(), indent=4)
+
+
+class ResourceVNet:
+    """Represents a Virtual Network (VNet) ARM resource.
+
+    Minimal helper to build a VNet with an address space and optional subnets.
+    Subnets are supplied as a list of dicts like:
+        {"name": "subnetA", "addressPrefix": "10.0.1.0/24"}
+    """
+
+    def __init__(self, name, region, address_space, subnets=None):
+        self.name = name
+        self.region = region
+        self.address_space = address_space
+        self.subnets = subnets or []
+
+    def to_dict(self):
+        return {
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2023-09-01",
+            "name": self.name,
+            "location": self.region,
+            "properties": {
+                "addressSpace": {"addressPrefixes": [self.address_space]},
+                "subnets": [
+                    {
+                        "name": s["name"],
+                        "properties": {"addressPrefix": s["addressPrefix"]},
+                    }
+                    for s in self.subnets
+                ],
+            },
+        }
+

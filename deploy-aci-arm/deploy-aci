@@ -134,7 +134,6 @@ if __name__ == "__main__":
         default=None,
     )
 
-
     parser.add_argument(
         "--vnet-subnet",
         type=str,
@@ -154,7 +153,12 @@ if __name__ == "__main__":
         default=True,
     )
 
-    parser.add_argument("--num-containers", type=int, default=1, help="Number of container groups to deploy")
+    parser.add_argument(
+        "--num-containers",
+        type=int,
+        default=1,
+        help="Number of container groups to deploy",
+    )
 
     parser.add_argument(
         "--dry-run",
@@ -163,7 +167,6 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    print(args)
 
     if args.use_nat is True and args.create_vnet is not True:
         print("Error: --use-nat requires --create-vnet")
@@ -238,31 +241,31 @@ if __name__ == "__main__":
             ports.append({"protocol": "UDP", "port": int(p)})
 
     for cidx in range(args.num_containers):
-      resources.append(
-          tb.ResourceACIGroup(
-              f"{args.name}-{cidx + 1}",
-              args.region,
-              sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
-              containers=[
-                  tb.CACI(
-                      name=f"{args.name}-0",
-                      image=args.image,
-                      cpu=args.cpus,
-                      ram=args.ram,
-                      ports=ports,
-                  )
-              ],
-              vnet=vnet,
-          ),
-      )
+        resources.append(
+            tb.ResourceACIGroup(
+                f"{args.name}-{cidx + 1}",
+                args.region,
+                sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
+                containers=[
+                    tb.CACI(
+                        name=f"{args.name}-0",
+                        image=args.image,
+                        cpu=args.cpus,
+                        ram=args.ram,
+                        ports=ports,
+                    )
+                ],
+                vnet=vnet,
+            ),
+        )
 
     deployment = tb.ARMTemplate(resources)
 
     with tempfile.NamedTemporaryFile() as tempf:
         dep_json = deployment.to_json()
         if args.dry_run is True:
-          print(dep_json)
-          exit(0)
+            print(dep_json)
+            exit(0)
         tempf.write(dep_json.encode("utf-8"))
         tempf.flush()
 
@@ -283,20 +286,22 @@ if __name__ == "__main__":
     if args.create_vnet is True or args.vnet_subnet is not None:
         print(f"Deployed")
         for cidx in range(args.num_containers):
-          print(f"Connect to container {cidx + 1} using:")
-          print("az container exec --resource-group {args.resource_group} --name {args.name}-{cidx + 1} --exec-command /bin/bash")
-          print("")
+            print(f"Connect to container {cidx + 1} using:")
+            print(
+                f"az container exec --resource-group {args.resource_group} --name {args.name}-{cidx + 1} --exec-command /bin/bash"
+            )
+            print("")
     else:
-      run(
-          [
-              "az",
-              "container",
-              "show",
-              "--resource-group",
-              args.resource_group,
-              "--name",
-              args.name,
-              "--query",
-              "ipAddress.ip",
-          ]
-      )
+        run(
+            [
+                "az",
+                "container",
+                "show",
+                "--resource-group",
+                args.resource_group,
+                "--name",
+                args.name,
+                "--query",
+                "ipAddress.ip",
+            ]
+        )

@@ -3,49 +3,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class CACI:
-    name: str
-    image: str
-    cpu: int = 8
-    ram: int = 16
-    # Use default_factory to avoid sharing a mutable list between instances
-    ports: list[dict] = field(default_factory=list)  # list of {"protocol": "TCP", "port": 22} dicts
-
-    def to_dict(self, ssh_key=None):
-        if ssh_key is None:
-            cmd = ["tail", "-f", "/dev/null"]
-            env = []
-        else:
-            cmd = [
-                "/bin/sh",
-                "-c",
-                "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && ssh-keygen -A && sed -i 's/PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/# PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D",
-            ]
-            env = [{"name": "SSH_ADMIN_KEY", "value": ssh_key}]
-
-        ports = list(self.ports)  # make a copy
-        ports_contains_22 = any(p.get("port") == 22 for p in self.ports)
-        if ssh_key and not ports_contains_22:
-            ports += [{"protocol": "TCP", "port": "22"}]
-        return {
-            "name": self.name,
-            "properties": {
-                "image": self.image,
-                "command": cmd,
-                "ports": ports,
-                "environmentVariables": env,
-                "volumeMounts": [],
-                "resources": {
-                    "requests": {
-                        "cpu": self.cpu,
-                        "memoryInGB": self.ram,
-                    }
-                },
-            },
-        }
-
-
-@dataclass
 class NSGRule:
     name: str
     priority: int
@@ -242,6 +199,51 @@ class ResourceNetworkInterface:
         }
 
 
+@dataclass
+class CACI:
+    name: str
+    image: str
+    cpu: int = 8
+    ram: int = 16
+    # Use default_factory to avoid sharing a mutable list between instances
+    ports: list[dict] = field(
+        default_factory=list
+    )  # list of {"protocol": "TCP", "port": 22} dicts
+
+    def to_dict(self, ssh_key=None):
+        if ssh_key is None:
+            cmd = ["tail", "-f", "/dev/null"]
+            env = []
+        else:
+            cmd = [
+                "/bin/sh",
+                "-c",
+                "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && ssh-keygen -A && sed -i 's/PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/# PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D",
+            ]
+            env = [{"name": "SSH_ADMIN_KEY", "value": ssh_key}]
+
+        ports = list(self.ports)  # make a copy
+        ports_contains_22 = any(p.get("port") == 22 for p in self.ports)
+        if ssh_key and not ports_contains_22:
+            ports += [{"protocol": "TCP", "port": "22"}]
+        return {
+            "name": self.name,
+            "properties": {
+                "image": self.image,
+                "command": cmd,
+                "ports": ports,
+                "environmentVariables": env,
+                "volumeMounts": [],
+                "resources": {
+                    "requests": {
+                        "cpu": self.cpu,
+                        "memoryInGB": self.ram,
+                    }
+                },
+            },
+        }
+
+
 class ResourceACIGroup:
     def __init__(
         self,
@@ -282,7 +284,7 @@ class ResourceACIGroup:
             image_crds = {}
 
         ports = self.ports
-        if self.sshkey:
+        if not any(port["port"] == 22 for port in self.ports):
             ports += [{"protocol": "TCP", "port": "22"}]
 
         if self.vnet:

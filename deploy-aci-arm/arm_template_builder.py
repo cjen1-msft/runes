@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 
 
 class CACI:
@@ -37,6 +38,45 @@ class CACI:
             },
         }
 
+
+@dataclass
+class VNetSubnet:
+    name: str
+    address_prefix: str
+    delegations: list[tuple[str, str]] | None = None
+
+    def to_dict(self):
+        d = {
+            "name": self.name,
+            "properties": {
+                "addressPrefix": self.address_prefix,
+            },
+        }
+        if self.delegations:
+            d["properties"]["delegations"] = self.delegations
+        return d
+
+
+@dataclass
+class ResourceVNet:
+    name: str
+    region: str
+    address_space: str
+    subnets: list[VNetSubnet] | None = None
+
+    def to_dict(self):
+        return {
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2023-09-01",
+            "name": self.name,
+            "location": self.region,
+            "properties": {
+                "addressSpace": {"addressPrefixes": [self.address_space]},
+                "subnets": [s.to_dict() for s in self.subnets],
+            },
+        }
+
+
 class ResourceACIGroup:
     def __init__(
         self,
@@ -47,7 +87,7 @@ class ResourceACIGroup:
         acr_creds=None,
         ports=None,
         sku="Confidential",
-        vnet_subnet=None,
+        vnet=None,
     ):
         self.name = name
         self.region = region
@@ -59,7 +99,7 @@ class ResourceACIGroup:
         else:
             self.ports = []
         self.sku = sku
-        self.vnet_subnet = vnet_subnet
+        self.vnet = vnet
 
     def to_dict(self):
         if self.acr_creds:
@@ -75,15 +115,21 @@ class ResourceACIGroup:
         else:
             image_crds = {}
 
-
         ports = self.ports
         if self.sshkey:
             ports += [{"protocol": "TCP", "port": "22"}]
 
-        if self.vnet_subnets:
+        if self.vnet:
             subnet = {
-              "subnetIds": [{ "id": }]
+                "subnetIds": [
+                    {
+                        "id": f"[resourceId('Microsoft.Network/virtualNetworks/subnets', '{self.vnet.name}', '{self.vnet.subnets[0].name}')]"
+                    }
+                ]
             }
+        else:
+            subnet = {}
+
         return {
             "type": "Microsoft.ContainerInstance/containerGroups",
             "apiVersion": "2022-10-01-preview",
@@ -96,7 +142,7 @@ class ResourceACIGroup:
                 "osType": "Linux",
                 "ipAddress": {
                     "ports": self.ports,
-                    "type": "Public",
+                    "type": "Public" if not self.vnet else "Private",
                 },
                 "volumes": [],
                 "confidentialComputeProperties": {
@@ -106,7 +152,7 @@ class ResourceACIGroup:
                     container.to_dict(self.sshkey) for container in self.containers
                 ],
             }
-            | image_crds,
+            | image_crds | subnet,
         }
 
 
@@ -125,37 +171,3 @@ class ARMTemplate:
 
     def to_json(self):
         return json.dumps(self.to_dict(), indent=4)
-
-
-class ResourceVNet:
-    """Represents a Virtual Network (VNet) ARM resource.
-
-    Minimal helper to build a VNet with an address space and optional subnets.
-    Subnets are supplied as a list of dicts like:
-        {"name": "subnetA", "addressPrefix": "10.0.1.0/24"}
-    """
-
-    def __init__(self, name, region, address_space, subnets=None):
-        self.name = name
-        self.region = region
-        self.address_space = address_space
-        self.subnets = subnets or []
-
-    def to_dict(self):
-        return {
-            "type": "Microsoft.Network/virtualNetworks",
-            "apiVersion": "2023-09-01",
-            "name": self.name,
-            "location": self.region,
-            "properties": {
-                "addressSpace": {"addressPrefixes": [self.address_space]},
-                "subnets": [
-                    {
-                        "name": s["name"],
-                        "properties": {"addressPrefix": s["addressPrefix"]},
-                    }
-                    for s in self.subnets
-                ],
-            },
-        }
-

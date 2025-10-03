@@ -21,6 +21,57 @@ def default_container_name():
     return f"test-{os.urandom(2).hex()}"
 
 
+sane_nsg_rules = [
+    # TODO
+]
+
+
+def new_vnet_with_nat(
+    vnet_name, subnet_name, nat_name: str, pub_ip_name: str, region: str
+) -> list:
+
+    print(f"Creating new VNet: {vnet_name}/{subnet_name} with NAT {nat_name}")
+
+    pub_ip = tb.ResourcePublicIP(
+        name=pub_ip_name,
+        region=region,
+        sku="Standard",
+        allocation_method="Static",
+    )
+
+    address_space = "10.0.0.0/16"
+
+    nat_gateway = tb.ResourceNAT(
+        name=nat_name,
+        region=region,
+        public_ip=pub_ip,
+        address_space=address_space,
+    )
+
+    vnet = tb.ResourceVNet(
+        name=vnet_name,
+        region=region,
+        address_space=address_space,
+        subnets=[
+            tb.VNetSubnet(
+                name=subnet_name,
+                address_prefix="10.0.0.0/24",
+                nat_gateway=nat_gateway,
+                delegations=[
+                    {
+                        "name": "aci-delegation",
+                        "properties": {
+                            "serviceName": "Microsoft.ContainerInstance/containerGroups"
+                        },
+                    }
+                ],
+            )
+        ],
+    )
+
+    return [pub_ip, nat_gateway, vnet]
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Start up a ACI container using the suppplied image"
@@ -87,37 +138,59 @@ if __name__ == "__main__":
         default=True,
     )
 
+    parser.add_argument(
+        "--use-nat",
+        help="Use a NAT gateway for the subnet",
+        default=True,
+    )
+
     args = parser.parse_args()
     print(args)
 
+    if args.use_nat is True and args.create_vnet is not True:
+        print("Error: --use-nat requires --create-vnet")
+        sys.exit(1)
+
+    resources = []
+
     if args.create_vnet is True:
-        if args.vnet_subnet is None:
+        if args.vnet_subnet is not None:
             vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
         else:
             vnet_name = f"{args.name}-vnet"
             subnet_name = "default"
 
         print(f"Creating new VNet: {vnet_name}/{subnet_name}")
+        if args.use_nat is True:
+            nat_name = f"{args.name}-nat"
+            public_ip_name = f"{args.name}-pip"
+            new_res = new_vnet_with_nat(
+                vnet_name, subnet_name, nat_name, public_ip_name, args.region
+            )
+            [_, _, vnet] = new_res
+            resources.extend(new_res)
+        else:
+            vnet = tb.ResourceVNet(
+                name=vnet_name,
+                region=args.region,
+                address_space="10.0.0.0/16",
+                subnets=[
+                    tb.VNetSubnet(
+                        name=subnet_name,
+                        address_prefix="10.0.0.0/24",
+                        delegations=[
+                            {
+                                "name": "aci-delegation",
+                                "properties": {
+                                    "serviceName": "Microsoft.ContainerInstance/containerGroups"
+                                },
+                            }
+                        ],
+                    )
+                ],
+            )
+            resources.append(vnet)
 
-        vnet = tb.ResourceVNet(
-            name=vnet_name,
-            region=args.region,
-            address_space="10.0.0.0/16",
-            subnets=[
-                tb.VNetSubnet(
-                    name=subnet_name,
-                    address_prefix="10.0.0.0/24",
-                    delegations=[
-                        {
-                            "name": "aci-delegation",
-                            "properties": {
-                                "serviceName": "Microsoft.ContainerInstance/containerGroups"
-                            },
-                        }
-                    ],
-                )
-            ],
-        )
     elif args.vnet_subnet is not None:
         print(f"Using existing VNet/Subnet: {args.vnet_subnet}")
         vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
@@ -131,31 +204,29 @@ if __name__ == "__main__":
                 )  # address_prefix is ignored
             ],
         )
+        resources.append(vnet)
     else:
         print("No VNet specified, deploying to public ACI")
         vnet = None
 
-    deployment = tb.ARMTemplate(
-        ([vnet] if args.create_vnet is True else [])
-        + (
-            [
-                tb.ResourceACIGroup(
-                    args.name,
-                    args.region,
-                    sshkey=get_ssh_key(args.ssh_key),
-                    containers=[
-                        tb.CACI(
-                            name=f"{args.name}-0",
-                            image=args.image,
-                            cpu=args.cpus,
-                            ram=args.ram,
-                        )
-                    ],
-                    vnet=vnet,
-                ),
-            ]
-        )
+    resources.append(
+        tb.ResourceACIGroup(
+            args.name,
+            args.region,
+            sshkey=get_ssh_key(args.ssh_key),
+            containers=[
+                tb.CACI(
+                    name=f"{args.name}-0",
+                    image=args.image,
+                    cpu=args.cpus,
+                    ram=args.ram,
+                )
+            ],
+            vnet=vnet,
+        ),
     )
+
+    deployment = tb.ARMTemplate(resources)
 
     with tempfile.NamedTemporaryFile() as tempf:
         dep_json = deployment.to_json()

@@ -211,14 +211,19 @@ class CACI:
     )  # list of {"protocol": "TCP", "port": 22} dicts
 
     def to_dict(self, ssh_key=None):
+        cmd_prefix = "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates" 
         if ssh_key is None:
-            cmd = ["tail", "-f", "/dev/null"]
+            cmd = [
+                "/bin/sh",
+                "-c",
+                f"{cmd_prefix} && tail -f /dev/null"
+            ]
             env = []
         else:
             cmd = [
                 "/bin/sh",
                 "-c",
-                "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && ssh-keygen -A && sed -i 's/PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/# PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D",
+                f"{cmd_prefix} && echo $SSH_ADMIN_KEY >> /root/.ssh/authorized_keys && ssh-keygen -A && sed -i 's/PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/# PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D",
             ]
             env = [{"name": "SSH_ADMIN_KEY", "value": ssh_key}]
 

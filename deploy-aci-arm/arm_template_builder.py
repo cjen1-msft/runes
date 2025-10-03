@@ -1,13 +1,15 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
+@dataclass
 class CACI:
-    def __init__(self, name, image, cpu, ram):
-        self.name = name
-        self.image = image
-        self.cpu = cpu
-        self.ram = ram
+    name: str
+    image: str
+    cpu: int = 8
+    ram: int = 16
+    # Use default_factory to avoid sharing a mutable list between instances
+    ports: list[dict] = field(default_factory=list)  # list of {"protocol": "TCP", "port": 22} dicts
 
     def to_dict(self, ssh_key=None):
         if ssh_key is None:
@@ -21,12 +23,16 @@ class CACI:
             ]
             env = [{"name": "SSH_ADMIN_KEY", "value": ssh_key}]
 
+        ports = list(self.ports)  # make a copy
+        ports_contains_22 = any(p.get("port") == 22 for p in self.ports)
+        if ssh_key and not ports_contains_22:
+            ports += [{"protocol": "TCP", "port": "22"}]
         return {
             "name": self.name,
             "properties": {
                 "image": self.image,
                 "command": cmd,
-                "ports": [{"protocol": "TCP", "port": "22"}] if ssh_key else [],
+                "ports": ports,
                 "environmentVariables": env,
                 "volumeMounts": [],
                 "resources": {

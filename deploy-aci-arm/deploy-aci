@@ -85,7 +85,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ssh-key",
         help="The ssh key to use for the container",
-        default="~/.ssh/id_rsa.pub",
+        default=None,
     )
     parser.add_argument(
         "--name",
@@ -121,6 +121,21 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--tcb-ports",
+        type=str,
+        help="Comma separated list of ports to open on the container",
+        default="22",
+    )
+
+    parser.add_argument(
+        "--udp-ports",
+        type=str,
+        help="Comma separated list of ports to open on the container",
+        default=None,
+    )
+
+
+    parser.add_argument(
         "--vnet-subnet",
         type=str,
         help="The VNet and subnet to deploy into eg: myvnet/mysubnet",
@@ -139,6 +154,14 @@ if __name__ == "__main__":
         default=True,
     )
 
+    parser.add_argument("--num-containers", type=int, default=1, help="Number of container groups to deploy")
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the ARM template and exit",
+    )
+
     args = parser.parse_args()
     print(args)
 
@@ -155,7 +178,6 @@ if __name__ == "__main__":
             vnet_name = f"{args.name}-vnet"
             subnet_name = "default"
 
-        print(f"Creating new VNet: {vnet_name}/{subnet_name}")
         if args.use_nat is True:
             nat_name = f"{args.name}-nat"
             public_ip_name = f"{args.name}-pip"
@@ -165,6 +187,7 @@ if __name__ == "__main__":
             [_, _, vnet] = new_res
             resources.extend(new_res)
         else:
+            print(f"Creating new VNet: {vnet_name}/{subnet_name}")
             vnet = tb.ResourceVNet(
                 name=vnet_name,
                 region=args.region,
@@ -201,31 +224,45 @@ if __name__ == "__main__":
         )
         resources.append(vnet)
     else:
-        print("No VNet specified, deploying to public ACI")
+        print("No VNet specified, deploying with public IP")
         vnet = None
 
-    resources.append(
-        tb.ResourceACIGroup(
-            args.name,
-            args.region,
-            sshkey=get_ssh_key(args.ssh_key),
-            containers=[
-                tb.CACI(
-                    name=f"{args.name}-0",
-                    image=args.image,
-                    cpu=args.cpus,
-                    ram=args.ram,
-                )
-            ],
-            vnet=vnet,
-        ),
-    )
+    ports = []
+    for p in (args.tcb_ports or "").split(","):
+        p = p.strip()
+        if p:
+            ports.append({"protocol": "TCP", "port": int(p)})
+    for p in (args.udp_ports or "").split(","):
+        p = p.strip()
+        if p:
+            ports.append({"protocol": "UDP", "port": int(p)})
+
+    for cidx in range(args.num_containers):
+      resources.append(
+          tb.ResourceACIGroup(
+              f"{args.name}-{cidx + 1}",
+              args.region,
+              sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
+              containers=[
+                  tb.CACI(
+                      name=f"{args.name}-0",
+                      image=args.image,
+                      cpu=args.cpus,
+                      ram=args.ram,
+                      ports=ports,
+                  )
+              ],
+              vnet=vnet,
+          ),
+      )
 
     deployment = tb.ARMTemplate(resources)
 
     with tempfile.NamedTemporaryFile() as tempf:
         dep_json = deployment.to_json()
-        print(dep_json)
+        if args.dry_run is True:
+          print(dep_json)
+          exit(0)
         tempf.write(dep_json.encode("utf-8"))
         tempf.flush()
 
@@ -243,16 +280,23 @@ if __name__ == "__main__":
         print(shlex.join(az_cmd))
         run(az_cmd, check=True)
 
-    run(
-        [
-            "az",
-            "container",
-            "show",
-            "--resource-group",
-            args.resource_group,
-            "--name",
-            args.name,
-            "--query",
-            "ipAddress.ip",
-        ]
-    )
+    if args.create_vnet is True or args.vnet_subnet is not None:
+        print(f"Deployed")
+        for cidx in range(args.num_containers):
+          print(f"Connect to container {cidx + 1} using:")
+          print("az container exec --resource-group {args.resource_group} --name {args.name}-{cidx + 1} --exec-command /bin/bash")
+          print("")
+    else:
+      run(
+          [
+              "az",
+              "container",
+              "show",
+              "--resource-group",
+              args.resource_group,
+              "--name",
+              args.name,
+              "--query",
+              "ipAddress.ip",
+          ]
+      )

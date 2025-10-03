@@ -19,14 +19,14 @@ def run_aci_public_image(args):
     az_cmd = [
         "az", "deployment", "group", "create",
         "--resource-group", args.resource_group,
-        "--template-file", f"{args.image_type}/public-template.json",
+        "--template-file", f"{args.image_type}/public-template.json" if not args.subnet else f"{args.image_type}/public-template-vnet.json",
         "--parameters", f"image={args.image}",
         "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
         "--parameters", f"name={args.name}",
         "--parameters", f"region={args.region}",
         "--parameters", f"ram={args.ram}",
         "--parameters", f"cpus={args.cpus}",
-    ]
+    ] + (["--parameters", f"subnet={args.subnet}"] if args.subnet else [])
     print("Running:")
     print(shlex.join(az_cmd))
     run(az_cmd, check=True)
@@ -125,6 +125,13 @@ if __name__ == "__main__":
         type=int,
         help="The amount of RAM (GB) to allocate to the container",
         default=16,
+    )
+
+    parser.add_argument(
+      "--subnet",
+      help="The subnet ID to deploy the container into",
+      default=None,
+      type=str
     )
 
 

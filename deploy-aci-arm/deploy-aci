@@ -83,25 +83,29 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--create-vnet",
-        action="store_true",
         help="Create a new VNet for the deployment",
         default=True,
     )
 
     args = parser.parse_args()
+    print(args)
 
-    if args.create_vnet and args.vnet_subnet is not None:
-        print("Cannot specify both --vnet-subnet and --create-vnet", file=sys.stderr)
-        sys.exit(1)
+    if args.create_vnet is True:
+        if args.vnet_subnet is None:
+            vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
+        else:
+            vnet_name = f"{args.name}-vnet"
+            subnet_name = "default"
 
-    if args.create_vnet:
+        print(f"Creating new VNet: {vnet_name}/{subnet_name}")
+
         vnet = tb.ResourceVNet(
-            name=f"{args.name}-vnet",
+            name=vnet_name,
             region=args.region,
             address_space="10.0.0.0/16",
             subnets=[
                 tb.VNetSubnet(
-                    name="default",
+                    name=subnet_name,
                     address_prefix="10.0.0.0/24",
                     delegations=[
                         {
@@ -114,27 +118,43 @@ if __name__ == "__main__":
                 )
             ],
         )
+    elif args.vnet_subnet is not None:
+        print(f"Using existing VNet/Subnet: {args.vnet_subnet}")
+        vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
+        vnet = tb.ResourceVNet(
+            name=vnet_name,
+            region=args.region,
+            address_space="",
+            subnets=[
+                tb.VNetSubnet(
+                    name=subnet_name, address_prefix=""
+                )  # address_prefix is ignored
+            ],
+        )
     else:
-        raise ValueError("Only --create-vnet is supported at this time")
+        print("No VNet specified, deploying to public ACI")
+        vnet = None
 
     deployment = tb.ARMTemplate(
-        [
-            vnet,
-            tb.ResourceACIGroup(
-                args.name,
-                args.region,
-                sshkey=get_ssh_key(args.ssh_key),
-                containers=[
-                    tb.CACI(
-                        name=f"{args.name}-0",
-                        image=args.image,
-                        cpu=args.cpus,
-                        ram=args.ram,
-                    )
-                ],
-                vnet=vnet,
-            ),
-        ]
+        ([vnet] if args.create_vnet is True else [])
+        + (
+            [
+                tb.ResourceACIGroup(
+                    args.name,
+                    args.region,
+                    sshkey=get_ssh_key(args.ssh_key),
+                    containers=[
+                        tb.CACI(
+                            name=f"{args.name}-0",
+                            image=args.image,
+                            cpu=args.cpus,
+                            ram=args.ram,
+                        )
+                    ],
+                    vnet=vnet,
+                ),
+            ]
+        )
     )
 
     with tempfile.NamedTemporaryFile() as tempf:

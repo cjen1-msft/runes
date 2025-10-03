@@ -152,7 +152,54 @@ class ResourceACIGroup:
                     container.to_dict(self.sshkey) for container in self.containers
                 ],
             }
-            | image_crds | subnet,
+            | image_crds
+            | subnet,
+        }
+
+
+@dataclass
+class ResourcePublicIP:
+    name: str
+    region: str
+    allocation_method: str = "Static"
+    sku: str = "Standard"
+
+    def to_dict(self):
+        return {
+            "type": "Microsoft.Network/publicIPAddresses",
+            "apiVersion": "2023-09-01",
+            "name": self.name,
+            "location": self.region,
+            "sku": {"name": self.sku},
+            "properties": {
+                "publicIPAllocationMethod": self.allocation_method,
+                "idleTimeoutInMinutes": 4,
+                "dnsSettings": {"domainNameLabel": self.name},
+            },
+        }
+
+
+@dataclass
+class ResourceNAT:
+    name: str
+    region: str
+    address_space: str
+    public_ip: ResourcePublicIP
+
+    def to_dict(self):
+        return {
+            "type": "Microsoft.Network/natGateways",
+            "apiVersion": "2023-09-01",
+            "name": self.name,
+            "location": self.region,
+            "properties": {
+                "publicIpAddresses": [
+                    {
+                        "id": f"[resourceId('Microsoft.Network/publicIPAddresses', '{self.public_ip_name}')]"
+                    }
+                ],
+                "idleTimeoutInMinutes": 4,
+            },
         }
 
 

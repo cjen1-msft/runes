@@ -37,8 +37,7 @@ class CACI:
             },
         }
 
-
-class ResourceCACIGroup:
+class ResourceACIGroup:
     def __init__(
         self,
         name,
@@ -48,6 +47,7 @@ class ResourceCACIGroup:
         acr_creds=None,
         ports=None,
         sku="Confidential",
+        vnet_subnet=None,
     ):
         self.name = name
         self.region = region
@@ -59,6 +59,7 @@ class ResourceCACIGroup:
         else:
             self.ports = []
         self.sku = sku
+        self.vnet_subnet = vnet_subnet
 
     def to_dict(self):
         if self.acr_creds:
@@ -74,10 +75,15 @@ class ResourceCACIGroup:
         else:
             image_crds = {}
 
+
         ports = self.ports
         if self.sshkey:
             ports += [{"protocol": "TCP", "port": "22"}]
 
+        if self.vnet_subnets:
+            subnet = {
+              "subnetIds": [{ "id": }]
+            }
         return {
             "type": "Microsoft.ContainerInstance/containerGroups",
             "apiVersion": "2022-10-01-preview",

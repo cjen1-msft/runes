@@ -73,8 +73,25 @@ if __name__ == "__main__":
         default=16,
     )
 
+    parser.add_argument(
+      "--vnet",
+      type=str,
+      help="The VNet to deploy into",
+      default=None
+    )
+
+    parser.add_argument(
+      "--create-vnet",
+      action="store_true",
+      help="Create a new VNet for the deployment",
+      default=True
+    )
 
     args = parser.parse_args()
+
+    if args.create_vnet and args.vnet is not None:
+        print("Cannot specify both --vnet and --create-vnet", file=sys.stderr)
+        sys.exit(1)
 
     deployment = tb.ARMTemplate([tb.CACIDeployment(
         args.name,
@@ -89,7 +106,6 @@ if __name__ == "__main__":
             )
         ]
     )])
-
 
     with tempfile.NamedTemporaryFile() as tempf:
         dep_json = deployment.to_json()

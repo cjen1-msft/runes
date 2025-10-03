@@ -54,6 +54,9 @@
       },
       "properties": {
         "sku": "Confidential",
+        "subNetIds": [{
+          "id": "/subscriptions/d8583813-7f3b-43a6-85ac-bac7e4751e5a/resourceGroups/test-amchamay/providers/Microsoft.Network/virtualNetworks/amchamay-dev-vmVNET/subnets/containers"
+        }],
         "restartPolicy": "Never",
         "osType": "Linux",
         "ipAddress": {
@@ -63,7 +66,7 @@
               "port": "22"
             }
           ],
-          "type": "Public"
+          "type": "Private"
         },
         "volumes": [],
         "confidentialComputeProperties": {

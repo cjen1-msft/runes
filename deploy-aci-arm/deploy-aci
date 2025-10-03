@@ -21,11 +21,6 @@ def default_container_name():
     return f"test-{os.urandom(2).hex()}"
 
 
-sane_nsg_rules = [
-    # TODO
-]
-
-
 def new_vnet_with_nat(
     vnet_name, subnet_name, nat_name: str, pub_ip_name: str, region: str
 ) -> list:

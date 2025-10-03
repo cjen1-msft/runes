@@ -9,6 +9,7 @@ from subprocess import run, PIPE
 
 from enum import Enum
 
+
 def get_ssh_key(ssh_key):
     with open(os.path.expanduser(ssh_key), "r") as f:
         return f.read().strip()
@@ -17,15 +18,30 @@ def get_ssh_key(ssh_key):
 def run_aci_public_image(args):
     print("Using public template")
     az_cmd = [
-        "az", "deployment", "group", "create",
-        "--resource-group", args.resource_group,
-        "--template-file", f"{args.image_type}/public-template.json" if not args.subnet else f"{args.image_type}/public-template-vnet.json",
-        "--parameters", f"image={args.image}",
-        "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters", f"name={args.name}",
-        "--parameters", f"region={args.region}",
-        "--parameters", f"ram={args.ram}",
-        "--parameters", f"cpus={args.cpus}",
+        "az",
+        "deployment",
+        "group",
+        "create",
+        "--resource-group",
+        args.resource_group,
+        "--template-file",
+        (
+            f"{args.image_type}/public-template.json"
+            if not args.subnet
+            else f"{args.image_type}/public-template-vnet.json"
+        ),
+        "--parameters",
+        f"image={args.image}",
+        "--parameters",
+        f"ssh={get_ssh_key(args.ssh_key)}",
+        "--parameters",
+        f"name={args.name}",
+        "--parameters",
+        f"region={args.region}",
+        "--parameters",
+        f"ram={args.ram}",
+        "--parameters",
+        f"cpus={args.cpus}",
     ] + (["--parameters", f"subnet={args.subnet}"] if args.subnet else [])
     print("Running:")
     print(shlex.join(az_cmd))
@@ -35,14 +51,19 @@ def run_aci_public_image(args):
 def run_aci_azure_image(args):
     print("Using azure auth template")
     acr = args.image.split(".azurecr.io")[0]
-    acr_token_cmd =[
-        "az", "acr", "login",
-        "--name", acr,
+    acr_token_cmd = [
+        "az",
+        "acr",
+        "login",
+        "--name",
+        acr,
         "--expose-token",
-        "--output", "tsv",
-        "--query", "accessToken",
+        "--output",
+        "tsv",
+        "--query",
+        "accessToken",
     ]
-     
+
     acr_token = (
         run(
             acr_token_cmd,
@@ -53,17 +74,30 @@ def run_aci_azure_image(args):
         .decode("utf-8")
     )
     az_cmd = [
-        "az", "deployment", "group", "create",
-        "--resource-group", args.resource_group,
-        "--template-file", f"{args.image_type}/private-template.json",
-        "--parameters", f"image={args.image}",
-        "--parameters", f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters", f"name={args.name}",
-        "--parameters", f"acr-repo={acr}",
-        "--parameters", f"acr-token={acr_token}",
-        "--parameters", f"region={args.region}",
-        "--parameters", f"ram={args.ram}",
-        "--parameters", f"cpus={args.cpus}",
+        "az",
+        "deployment",
+        "group",
+        "create",
+        "--resource-group",
+        args.resource_group,
+        "--template-file",
+        f"{args.image_type}/private-template.json",
+        "--parameters",
+        f"image={args.image}",
+        "--parameters",
+        f"ssh={get_ssh_key(args.ssh_key)}",
+        "--parameters",
+        f"name={args.name}",
+        "--parameters",
+        f"acr-repo={acr}",
+        "--parameters",
+        f"acr-token={acr_token}",
+        "--parameters",
+        f"region={args.region}",
+        "--parameters",
+        f"ram={args.ram}",
+        "--parameters",
+        f"cpus={args.cpus}",
     ]
     print("Running:")
     print(shlex.join(az_cmd))
@@ -119,7 +153,7 @@ if __name__ == "__main__":
         help="The number of CPUs to allocate to the container",
         default=4,
     )
-    
+
     parser.add_argument(
         "--ram",
         type=int,
@@ -128,12 +162,11 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-      "--subnet",
-      help="The subnet ID to deploy the container into",
-      default=None,
-      type=str
+        "--subnet",
+        help="The subnet ID to deploy the container into",
+        default=None,
+        type=str,
     )
-
 
     args = parser.parse_args()
 

@@ -154,9 +154,9 @@ class ResourceVNet:
                     "subnets": [s.to_dict() for s in self.subnets],
                 },
             }
-            | {"dependsOn": depends_on}
+            | ({"dependsOn": depends_on}
             if len(depends_on) > 0
-            else {}
+            else {})
         )
 
 

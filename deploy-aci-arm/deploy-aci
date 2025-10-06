@@ -6,6 +6,7 @@ import os
 import shlex
 import arm_template_builder as tb
 import tempfile
+import textwrap
 
 from subprocess import run, PIPE
 
@@ -68,36 +69,43 @@ def new_vnet_with_nat(
 
 
 if __name__ == "__main__":
+    epilog = textwrap.dedent("""
+    Example usage:
+
+    Deploy a container into a new vnet (deploy1-vnet/default) with a public IP:
+    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy1 --ssh-key ~/.ssh/id_rsa.pub --create-vnet False
+
+    Deploy 5 large containers into a new vnet with a NAT gateway:
+    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy2 --cpus 64 --ram 256 --num-containers 5 --vnet-subnet myvnet/mysubnet
+
+    Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
+    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
+    """)
     parser = argparse.ArgumentParser(
-        description="Start up a ACI container using the suppplied image"
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Start up a ACI deployment with sensible defaults.",
+        epilog=epilog,
     )
     parser.add_argument(
-        "--image", help="The image to use for the container", required=True
+        "--image", help="The image to use for all containers", required=True
     )
     parser.add_argument(
         "--azure-auth", help="Use az command to do authentication", action="store_true"
     )
     parser.add_argument(
         "--resource-group",
-        help="The resource group to use for the container",
+        help="The resource group for the deployment",
         required=True,
     )
     parser.add_argument(
         "--ssh-key",
-        help="The ssh key to use for the container",
+        help="The ssh key for the deployment",
         default=None,
     )
     parser.add_argument(
         "--name",
-        help="The name to use for the container",
+        help="The name for the deployment",
         default=default_container_name(),
-    )
-
-    parser.add_argument(
-        "--image-type",
-        help="The type of image",
-        choices=["ubuntu", "azure-linux"],
-        default="azure-linux",
     )
 
     parser.add_argument(
@@ -109,35 +117,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cpus",
         type=int,
-        help="The number of CPUs to allocate to the container",
+        help="The number of CPUs to allocate to each container",
         default=4,
     )
 
     parser.add_argument(
         "--ram",
         type=int,
-        help="The amount of RAM (GB) to allocate to the container",
+        help="The amount of RAM (GB) to allocate to each container",
         default=16,
     )
 
     parser.add_argument(
         "--tcb-ports",
         type=str,
-        help="Comma separated list of ports to open on the container",
+        help="Comma separated list of ports to open on each container",
         default="22",
     )
 
     parser.add_argument(
         "--udp-ports",
         type=str,
-        help="Comma separated list of ports to open on the container",
-        default=None,
-    )
-
-    parser.add_argument(
-        "--vnet-subnet",
-        type=str,
-        help="The VNet and subnet to deploy into eg: myvnet/mysubnet",
+        help="Comma separated list of ports to open on each container",
         default=None,
     )
 
@@ -148,8 +149,15 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--use-nat",
-        help="Use a NAT gateway for the subnet",
+        "--vnet-subnet",
+        type=str,
+        help="The name of the vnet and subnet to use, in the form vnet/subnet. If not specified, and --create-vnet is set, it will use <name>-vnet/default",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--create-nat",
+        help="Create a NAT gateway for the VNet",
         default=True,
     )
 
@@ -168,8 +176,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.use_nat is True and args.create_vnet is not True:
-        print("Error: --use-nat requires --create-vnet")
+    if args.create_nat is True and args.create_vnet is not True:
+        print("Error: --create-nat requires --create-vnet")
         sys.exit(1)
 
     resources = []
@@ -181,7 +189,7 @@ if __name__ == "__main__":
             vnet_name = f"{args.name}-vnet"
             subnet_name = "default"
 
-        if args.use_nat is True:
+        if args.create_nat is True:
             nat_name = f"{args.name}-nat"
             public_ip_name = f"{args.name}-pip"
             new_res = new_vnet_with_nat(

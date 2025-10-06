@@ -191,7 +191,7 @@ if __name__ == "__main__":
 
         if args.create_nat is True:
             nat_name = f"{args.name}-nat"
-            public_ip_name = f"{args.name}-pip"
+            public_ip_name = f"{args.name}-ip"
             new_res = new_vnet_with_nat(
                 vnet_name, subnet_name, nat_name, public_ip_name, args.region
             )

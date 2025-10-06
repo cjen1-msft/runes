@@ -69,7 +69,8 @@ def new_vnet_with_nat(
 
 
 if __name__ == "__main__":
-    epilog = textwrap.dedent("""
+    epilog = textwrap.dedent(
+        """
     Example usage:
 
     Deploy a container into a new vnet (deploy1-vnet/default) with a public IP:
@@ -80,7 +81,8 @@ if __name__ == "__main__":
 
     Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
     deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
-    """)
+    """
+    )
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Start up a ACI deployment with sensible defaults.",
@@ -174,11 +176,7 @@ if __name__ == "__main__":
         help="Print the ARM template and exit",
     )
 
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Verbose output"
-    )
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
 

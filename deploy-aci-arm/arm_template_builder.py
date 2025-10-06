@@ -143,21 +143,16 @@ class ResourceVNet:
         depends_on = [
             s.nat_gateway.get_name() for s in self.subnets if s.nat_gateway is not None
         ]
-        return (
-            {
-                "type": "Microsoft.Network/virtualNetworks",
-                "apiVersion": "2023-09-01",
-                "name": self.name,
-                "location": self.region,
-                "properties": {
-                    "addressSpace": {"addressPrefixes": [self.address_space]},
-                    "subnets": [s.to_dict() for s in self.subnets],
-                },
-            }
-            | ({"dependsOn": depends_on}
-            if len(depends_on) > 0
-            else {})
-        )
+        return {
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2023-09-01",
+            "name": self.name,
+            "location": self.region,
+            "properties": {
+                "addressSpace": {"addressPrefixes": [self.address_space]},
+                "subnets": [s.to_dict() for s in self.subnets],
+            },
+        } | ({"dependsOn": depends_on} if len(depends_on) > 0 else {})
 
 
 @dataclass
@@ -211,13 +206,9 @@ class CACI:
     )  # list of {"protocol": "TCP", "port": 22} dicts
 
     def to_dict(self, ssh_key=None):
-        cmd_prefix = "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates" 
+        cmd_prefix = "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates"
         if ssh_key is None:
-            cmd = [
-                "/bin/sh",
-                "-c",
-                f"{cmd_prefix} && tail -f /dev/null"
-            ]
+            cmd = ["/bin/sh", "-c", f"{cmd_prefix} && tail -f /dev/null"]
             env = []
         else:
             cmd = [

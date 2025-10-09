@@ -72,6 +72,12 @@ class ResourcePublicIP:
                 "publicIPAddressVersion": "IPv4",
                 "publicIPAllocationMethod": self.allocation_method,
                 "idleTimeoutInMinutes": 4,
+                "ipTags": [
+                  {
+                    "ipTagType": "FirstPartyUsage",
+                    "tag": "/NonProd"
+                  }
+                ],
             },
         }
 

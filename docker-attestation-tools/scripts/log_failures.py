@@ -7,22 +7,23 @@ import pathlib
 import shlex
 import sys
 
+
 def log_failure(log_dir, workspace, iteration, returnobj):
     ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     fail_dir = log_dir / f"fail_{iteration}_ts{ts}"
     fail_dir.mkdir(parents=True, exist_ok=False)
     if returnobj is not None:
-      with open(fail_dir / "out", "w") as f:
-          f.write(returnobj.stdout)
+        with open(fail_dir / "out", "w") as f:
+            f.write(returnobj.stdout)
     if workspace.exists():
-      workspace.rename(fail_dir / "workspace")
+        workspace.rename(fail_dir / "workspace")
     return fail_dir
+
 
 def main():
     p = argparse.ArgumentParser(
         description="Repeatedly run a command until duration elapses; on failure dump output to logs."
     )
-    p.add_argument("command", help="Command to run (shell-style string or -- use --args ... form)")
     p.add_argument(
         "--duration",
         type=float,
@@ -46,10 +47,15 @@ def main():
         help="Sleep seconds between runs",
     )
     p.add_argument(
-      "--workspace-dir",
-      type=str,
-      default="workspace",
-      help="Workspace directory, moved when a failure occcurs",
+        "--workspace-dir",
+        type=str,
+        default="workspace",
+        help="Workspace directory, moved when a failure occcurs",
+    )
+    p.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command to run (shell-style string or -- use --args ... form)",
     )
     args = p.parse_args()
 
@@ -80,7 +86,9 @@ def main():
         except Exception as e:
             failures += 1
             log_path = log_failure(log_dir, workspace, iteration, None)
-            print(f"[ITER {iteration}] EXCEPTION -> logged to {log_path}", file=sys.stderr)
+            print(
+                f"[ITER {iteration}] EXCEPTION -> logged to {log_path}", file=sys.stderr
+            )
             if args.stop_on_fail:
                 break
             continue
@@ -104,6 +112,7 @@ def main():
     print(f"Done. Iterations={iteration} Failures={failures}")
     if failures:
         print(f"Failure logs in: {log_dir}")
+
 
 if __name__ == "__main__":
     main()

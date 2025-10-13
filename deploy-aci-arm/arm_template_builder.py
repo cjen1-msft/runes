@@ -111,6 +111,7 @@ class VNetSubnet:
     address_prefix: str
     delegations: list[tuple[str, str]] | None = None
     nat_gateway: ResourceNAT | None = None
+    allow_outbound: bool = False
 
     def to_dict(self):
         if self.nat_gateway:
@@ -125,6 +126,7 @@ class VNetSubnet:
             "name": self.name,
             "properties": {
                 "addressPrefix": self.address_prefix,
+                "defaultoutboundaccess": self.allow_outbound,
             }
             | nat_gateway_,
         }

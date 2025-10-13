@@ -53,9 +53,13 @@ def main():
         help="Workspace directory, moved when a failure occcurs",
     )
     p.add_argument(
-        "command",
-        nargs=argparse.REMAINDER,
-        help="Command to run (shell-style string or -- use --args ... form)",
+      "command",
+      help = "Executable",
+    )
+    p.add_argument(
+      "args_remainder",
+      nargs=argparse.REMAINDER,
+      help="Command to run (shell-style string or -- use --args ... form)",
     )
     args = p.parse_args()
 
@@ -68,8 +72,7 @@ def main():
     iteration = 0
     failures = 0
 
-    # Split command like a shell (no globbing/vars) for safety; if user truly needs shell features they can wrap in 'bash -c'
-    cmd = shlex.split(args.command)
+    cmd = [args.command] + args.args_remainder if args.args_remainder else cmd
 
     print(f"Starting loop for up to {args.duration:.2f}hr: {' '.join(cmd)}")
     while time.time() < deadline:

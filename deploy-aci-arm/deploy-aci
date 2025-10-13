@@ -4,6 +4,9 @@ import argparse
 import sys
 import os
 import shlex
+import arm_template_builder as tb
+import tempfile
+import textwrap
 
 from subprocess import run, PIPE
 
@@ -15,130 +18,96 @@ def get_ssh_key(ssh_key):
         return f.read().strip()
 
 
-def run_aci_public_image(args):
-    print("Using public template")
-    az_cmd = [
-        "az",
-        "deployment",
-        "group",
-        "create",
-        "--resource-group",
-        args.resource_group,
-        "--template-file",
-        (
-            f"{args.image_type}/public-template.json"
-            if not args.subnet
-            else f"{args.image_type}/public-template-vnet.json"
-        ),
-        "--parameters",
-        f"image={args.image}",
-        "--parameters",
-        f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters",
-        f"name={args.name}",
-        "--parameters",
-        f"region={args.region}",
-        "--parameters",
-        f"ram={args.ram}",
-        "--parameters",
-        f"cpus={args.cpus}",
-    ] + (["--parameters", f"subnet={args.subnet}"] if args.subnet else [])
-    print("Running:")
-    print(shlex.join(az_cmd))
-    run(az_cmd, check=True)
-
-
-def run_aci_azure_image(args):
-    print("Using azure auth template")
-    acr = args.image.split(".azurecr.io")[0]
-    acr_token_cmd = [
-        "az",
-        "acr",
-        "login",
-        "--name",
-        acr,
-        "--expose-token",
-        "--output",
-        "tsv",
-        "--query",
-        "accessToken",
-    ]
-
-    acr_token = (
-        run(
-            acr_token_cmd,
-            check=True,
-            stdout=PIPE,
-        )
-        .stdout.strip()
-        .decode("utf-8")
-    )
-    az_cmd = [
-        "az",
-        "deployment",
-        "group",
-        "create",
-        "--resource-group",
-        args.resource_group,
-        "--template-file",
-        f"{args.image_type}/private-template.json",
-        "--parameters",
-        f"image={args.image}",
-        "--parameters",
-        f"ssh={get_ssh_key(args.ssh_key)}",
-        "--parameters",
-        f"name={args.name}",
-        "--parameters",
-        f"acr-repo={acr}",
-        "--parameters",
-        f"acr-token={acr_token}",
-        "--parameters",
-        f"region={args.region}",
-        "--parameters",
-        f"ram={args.ram}",
-        "--parameters",
-        f"cpus={args.cpus}",
-    ]
-    print("Running:")
-    print(shlex.join(az_cmd))
-    run(az_cmd, check=True)
-
-
 def default_container_name():
     return f"test-{os.urandom(2).hex()}"
 
 
+def new_vnet_with_nat(
+    vnet_name, subnet_name, nat_name: str, pub_ip_name: str, region: str
+) -> list:
+
+    print(f"Creating new VNet: {vnet_name}/{subnet_name} with NAT {nat_name}")
+
+    pub_ip = tb.ResourcePublicIP(
+        name=pub_ip_name,
+        region=region,
+        sku="Standard",
+        allocation_method="Static",
+    )
+
+    address_space = "10.0.0.0/16"
+
+    nat_gateway = tb.ResourceNAT(
+        name=nat_name,
+        region=region,
+        public_ip=pub_ip,
+        address_space=address_space,
+    )
+
+    vnet = tb.ResourceVNet(
+        name=vnet_name,
+        region=region,
+        address_space=address_space,
+        subnets=[
+            tb.VNetSubnet(
+                name=subnet_name,
+                address_prefix="10.0.0.0/24",
+                nat_gateway=nat_gateway,
+                delegations=[
+                    {
+                        "name": "aci-delegation",
+                        "properties": {
+                            "serviceName": "Microsoft.ContainerInstance/containerGroups"
+                        },
+                    }
+                ],
+            )
+        ],
+    )
+
+    return [pub_ip, nat_gateway, vnet]
+
+
 if __name__ == "__main__":
+    epilog = textwrap.dedent(
+        """
+    Example usage:
+
+    Deploy a container into a new vnet (deploy1-vnet/default) with a public IP:
+    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy1 --ssh-key ~/.ssh/id_rsa.pub --create-vnet False
+
+    Deploy 5 large containers into a new vnet with a NAT gateway:
+    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy2 --cpus 64 --ram 256 --num-containers 5 --vnet-subnet myvnet/mysubnet
+
+    Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
+    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
+    """
+    )
     parser = argparse.ArgumentParser(
-        description="Start up a ACI container using the suppplied image"
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Start up a ACI deployment with sensible defaults.",
+        epilog=epilog,
     )
     parser.add_argument(
-        "--image", help="The image to use for the container", required=True
+        "--image", help="The image to use for all containers", required=True
     )
     parser.add_argument(
         "--azure-auth", help="Use az command to do authentication", action="store_true"
     )
     parser.add_argument(
         "--resource-group",
-        help="The resource group to use for the container",
+        help="The resource group for the deployment",
         required=True,
     )
     parser.add_argument(
         "--ssh-key",
-        help="The ssh key to use for the container",
-        default="~/.ssh/id_rsa.pub",
+        help="The ssh key for the deployment",
+        default=None,
     )
     parser.add_argument(
         "--name",
-        help="The name to use for the container",
+        help="The name for the deployment",
         default=default_container_name(),
-    )
-
-    parser.add_argument(
-        "--image-type",
-        help="The type of image",
-        choices=["ubuntu", "azure-linux"],
-        default="azure-linux",
     )
 
     parser.add_argument(
@@ -150,41 +119,201 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cpus",
         type=int,
-        help="The number of CPUs to allocate to the container",
+        help="The number of CPUs to allocate to each container",
         default=4,
     )
 
     parser.add_argument(
         "--ram",
         type=int,
-        help="The amount of RAM (GB) to allocate to the container",
+        help="The amount of RAM (GB) to allocate to each container",
         default=16,
     )
 
     parser.add_argument(
-        "--subnet",
-        help="The subnet ID to deploy the container into",
-        default=None,
+        "--tcb-ports",
         type=str,
+        help="Comma separated list of ports to open on each container",
+        default="22",
     )
+
+    parser.add_argument(
+        "--udp-ports",
+        type=str,
+        help="Comma separated list of ports to open on each container",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--create-vnet",
+        help="Create a new VNet for the deployment",
+        default=True,
+    )
+
+    parser.add_argument(
+        "--vnet-subnet",
+        type=str,
+        help="The name of the vnet and subnet to use, in the form vnet/subnet. If not specified, and --create-vnet is set, it will use <name>-vnet/default",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--create-nat",
+        help="Create a NAT gateway for the VNet",
+        default=True,
+    )
+
+    parser.add_argument(
+        "--num-containers",
+        type=int,
+        default=1,
+        help="Number of container groups to deploy",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the ARM template and exit",
+    )
+
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
 
-    if args.azure_auth:
-        run_aci_azure_image(args)
-    else:
-        run_aci_public_image(args)
+    if args.create_nat is True and args.create_vnet is not True:
+        print("Error: --create-nat requires --create-vnet")
+        sys.exit(1)
 
-    run(
-        [
+    resources = []
+
+    if args.create_vnet is True:
+        if args.vnet_subnet is not None:
+            vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
+        else:
+            vnet_name = f"{args.name}-vnet"
+            subnet_name = "default"
+
+        if args.create_nat is True:
+            nat_name = f"{args.name}-nat"
+            public_ip_name = f"{args.name}-ip"
+            new_res = new_vnet_with_nat(
+                vnet_name, subnet_name, nat_name, public_ip_name, args.region
+            )
+            [_, _, vnet] = new_res
+            resources.extend(new_res)
+        else:
+            print(f"Creating new VNet: {vnet_name}/{subnet_name}")
+            vnet = tb.ResourceVNet(
+                name=vnet_name,
+                region=args.region,
+                address_space="10.0.0.0/16",
+                subnets=[
+                    tb.VNetSubnet(
+                        name=subnet_name,
+                        address_prefix="10.0.0.0/24",
+                        delegations=[
+                            {
+                                "name": "aci-delegation",
+                                "properties": {
+                                    "serviceName": "Microsoft.ContainerInstance/containerGroups"
+                                },
+                            }
+                        ],
+                    )
+                ],
+            )
+            resources.append(vnet)
+
+    elif args.vnet_subnet is not None:
+        print(f"Using existing VNet/Subnet: {args.vnet_subnet}")
+        vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
+        vnet = tb.ResourceVNet(
+            name=vnet_name,
+            region=args.region,
+            address_space="",
+            subnets=[
+                tb.VNetSubnet(
+                    name=subnet_name, address_prefix=""
+                )  # address_prefix is ignored
+            ],
+        )
+        resources.append(vnet)
+    else:
+        print("No VNet specified, deploying with public IP")
+        vnet = None
+
+    ports = []
+    for p in (args.tcb_ports or "").split(","):
+        p = p.strip()
+        if p:
+            ports.append({"protocol": "TCP", "port": int(p)})
+    for p in (args.udp_ports or "").split(","):
+        p = p.strip()
+        if p:
+            ports.append({"protocol": "UDP", "port": int(p)})
+
+    for cidx in range(args.num_containers):
+        resources.append(
+            tb.ResourceACIGroup(
+                f"{args.name}-{cidx + 1}",
+                args.region,
+                sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
+                containers=[
+                    tb.CACI(
+                        name=f"{args.name}-0",
+                        image=args.image,
+                        cpu=args.cpus,
+                        ram=args.ram,
+                        ports=ports,
+                    )
+                ],
+                vnet=vnet,
+            ),
+        )
+
+    deployment = tb.ARMTemplate(resources)
+
+    with tempfile.NamedTemporaryFile() as tempf:
+        dep_json = deployment.to_json()
+        if args.dry_run is True:
+            print(dep_json)
+            exit(0)
+        tempf.write(dep_json.encode("utf-8"))
+        tempf.flush()
+
+        az_cmd = [
             "az",
-            "container",
-            "show",
+            "deployment",
+            "group",
+            "create",
             "--resource-group",
             args.resource_group,
-            "--name",
-            args.name,
-            "--query",
-            "ipAddress.ip",
-        ]
-    )
+            "--template-file",
+            tempf.name,
+        ] + (["--verbose", "--debug"] if args.verbose else [])
+        print("Running:")
+        print(shlex.join(az_cmd))
+        run(az_cmd, check=True)
+
+    if args.create_vnet is True or args.vnet_subnet is not None:
+        print(f"Deployed")
+        for cidx in range(args.num_containers):
+            print(f"Connect to container {cidx + 1} using:")
+            print(
+                f"az container exec --resource-group {args.resource_group} --name {args.name}-{cidx + 1} --exec-command /bin/bash"
+            )
+            print("")
+    else:
+        run(
+            [
+                "az",
+                "container",
+                "show",
+                "--resource-group",
+                args.resource_group,
+                "--name",
+                args.name,
+                "--query",
+                "ipAddress.ip",
+            ]
+        )

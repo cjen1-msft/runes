@@ -304,16 +304,17 @@ if __name__ == "__main__":
             )
             print("")
     else:
-        run(
-            [
-                "az",
-                "container",
-                "show",
-                "--resource-group",
-                args.resource_group,
-                "--name",
-                args.name,
-                "--query",
-                "ipAddress.ip",
-            ]
-        )
+        for cidx in range(args.num_containers):
+          run(
+              [
+                  "az",
+                  "container",
+                  "show",
+                  "--resource-group",
+                  args.resource_group,
+                  "--name",
+                  f"{args.name}-{cidx + 1}",
+                  "--query",
+                  "ipAddress.ip",
+              ]
+          )

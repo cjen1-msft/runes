@@ -203,6 +203,7 @@ class CACI:
     image: str
     cpu: int = 8
     ram: int = 16
+    privileged: bool = True
     # Use default_factory to avoid sharing a mutable list between instances
     ports: list[dict] = field(
         default_factory=list
@@ -239,6 +240,9 @@ class CACI:
                         "memoryInGB": self.ram,
                     }
                 },
+                "securityContext": {
+                    "privileged": self.privileged,
+                }
             },
         }
 

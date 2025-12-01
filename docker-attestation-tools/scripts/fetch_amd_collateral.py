@@ -37,6 +37,8 @@ def make_leaf_url(base_url, product_family, chip_id, tcbm):
             "blSPL": int(tcbm[14:16], base=16),
         }
     elif product_family == AMDCPUFamily.Turin.value:
+        # Note hwid is explicitly shortened for turin (the full chip_id in the attestation will not work)
+        # See Table 11 (section 3.1) of the VCEK spec for details
         hwid = chip_id[0:16]
         params = {
             "ucodeSPL": int(tcbm[0:2], base=16),

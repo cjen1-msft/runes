@@ -1,4 +1,5 @@
 import argparse
+from enum import Enum
 import logging
 import sys
 import httpx
@@ -6,6 +7,12 @@ import base64
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+
+
+class AMDCPUFamily(Enum):
+    Milan = "Milan"
+    Genoa = "Genoa"
+    Turin = "Turin"
 
 
 def make_host_amd_blob(tcbm, leaf, chain):
@@ -17,15 +24,33 @@ def make_host_amd_blob(tcbm, leaf, chain):
 
 
 def make_leaf_url(base_url, product_family, chip_id, tcbm):
-    microcode = int(tcbm[0:2], base=16)
-    snp = int(tcbm[2:4], base=16)
-    # 4 reserved bytes
-    tee = int(tcbm[12:14], base=16)
-    bootloader = int(tcbm[14:16], base=16)
+    if len(tcbm) != 16:
+        raise ValueError("TCBM must be 16 hex characters (64 bits)")
 
-    return (
-        f"{base_url}/vcek/v1/{product_family}/{chip_id}"
-        + f"?blSPL={bootloader}&teeSPL={tee}&snpSPL={snp}&ucodeSPL={microcode}"
+    if product_family in [AMDCPUFamily.Milan.value, AMDCPUFamily.Genoa.value]:
+        hwid = chip_id
+        params = {
+            "ucodeSPL": int(tcbm[0:2], base=16),
+            "snpSPL": int(tcbm[2:4], base=16),
+            # 4 reserved bytes
+            "teeSPL": int(tcbm[12:14], base=16),
+            "blSPL": int(tcbm[14:16], base=16),
+        }
+    elif product_family == AMDCPUFamily.Turin.value:
+        hwid = chip_id[0:16]
+        params = {
+            "ucodeSPL": int(tcbm[0:2], base=16),
+            # 3 reserved bytes
+            "snpSPL": int(tcbm[8:10], base=16),
+            "teeSPL": int(tcbm[10:12], base=16),
+            "blSPL": int(tcbm[12:14], base=16),
+            "fmcSPL": int(tcbm[14:16], base=16),
+        }
+    else:
+        raise ValueError(f"Unknown product family {product_family}")
+
+    return f"{base_url}/vcek/v1/{product_family}/{hwid}?" + "&".join(
+        [f"{k}={v}" for k, v in params.items()]
     )
 
 
@@ -56,7 +81,8 @@ if __name__ == "__main__":
         "--product-family",
         type=str,
         default="Milan",
-        help="AMD product family (e.g., Milan, Genoa).",
+        choices=[pf.value for pf in AMDCPUFamily],
+        help="AMD product family",
     )
     parser.add_argument(
         "--output",

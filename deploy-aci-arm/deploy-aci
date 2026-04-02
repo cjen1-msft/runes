@@ -4,11 +4,13 @@ import argparse
 import sys
 import os
 import shlex
+import time
 import arm_template_builder as tb
 import tempfile
 import textwrap
 
 from subprocess import run, PIPE
+from subprocess import CalledProcessError
 
 from enum import Enum
 
@@ -25,9 +27,6 @@ def default_container_name():
 def new_vnet_with_nat(
     vnet_name, subnet_name, nat_name: str, pub_ip_name: str, region: str
 ) -> list:
-
-    print(f"Creating new VNet: {vnet_name}/{subnet_name} with NAT {nat_name}")
-
     pub_ip = tb.ResourcePublicIP(
         name=pub_ip_name,
         region=region,
@@ -68,29 +67,192 @@ def new_vnet_with_nat(
     return [pub_ip, nat_gateway, vnet]
 
 
-if __name__ == "__main__":
-    epilog = textwrap.dedent(
-        """
-    Example usage:
+def requested_private_ip_for_index(container_index: int) -> str:
+    return f"10.0.0.{container_index + 4}"
 
-    Deploy a container into a new vnet (deploy1-vnet/default) with a public IP:
-    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy1 --ssh-key ~/.ssh/id_rsa.pub --create-vnet False
 
-    Deploy 5 large containers into a new vnet with a NAT gateway:
-    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy2 --cpus 64 --ram 256 --num-containers 5 --vnet-subnet myvnet/mysubnet
+def load_balancer_name(container_group_name: str) -> str:
+    return f"{container_group_name}-lb"
 
-    Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
-    deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
-    """
+
+def load_balancer_public_ip_name(container_group_name: str) -> str:
+    return f"{container_group_name}-lb-ip"
+
+
+def load_balancer_backend_address_name(lb_name: str) -> str:
+    return f"{lb_name}-backend-address"
+
+
+def get_container_group_private_ip(resource_group: str, container_group_name: str) -> str:
+    result = run(
+        [
+            "az",
+            "container",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            container_group_name,
+            "--query",
+            "ipAddress.ip",
+            "-o",
+            "tsv",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
+    return result.stdout.strip()
+
+
+def update_load_balancer_backend_address(
+    resource_group: str,
+    lb_name: str,
+    backend_name: str,
+    ip_address: str,
+    vnet_name: str,
+    subnet_name: str,
+) -> None:
+    run(
+        [
+            "az",
+            "network",
+            "lb",
+            "address-pool",
+            "address",
+            "update",
+            "--resource-group",
+            resource_group,
+            "--lb-name",
+            lb_name,
+            "--pool-name",
+            "BackendPool",
+            "--name",
+            backend_name,
+            "--vnet",
+            vnet_name,
+            "--ip-address",
+            ip_address,
+            "--subnet",
+            subnet_name,
+        ],
+        check=True,
+    )
+
+
+def add_load_balancer_backend_address(
+    resource_group: str,
+    lb_name: str,
+    backend_name: str,
+    ip_address: str,
+    vnet_name: str,
+    subnet_name: str,
+) -> None:
+    run(
+        [
+            "az",
+            "network",
+            "lb",
+            "address-pool",
+            "address",
+            "add",
+            "--resource-group",
+            resource_group,
+            "--lb-name",
+            lb_name,
+            "--pool-name",
+            "BackendPool",
+            "--name",
+            backend_name,
+            "--vnet",
+            vnet_name,
+            "--ip-address",
+            ip_address,
+            "--subnet",
+            subnet_name,
+        ],
+        check=True,
+    )
+
+
+def get_public_ip_address(resource_group: str, public_ip_name: str) -> str:
+    result = run(
+        [
+            "az",
+            "network",
+            "public-ip",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            public_ip_name,
+            "--query",
+            "ipAddress",
+            "-o",
+            "tsv",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def load_balancer_backend_update_command(
+    resource_group: str,
+    lb_name: str,
+    backend_name: str,
+    ip_address: str,
+    vnet_name: str,
+    subnet_name: str,
+) -> list[str]:
+    return [
+        "az",
+        "network",
+        "lb",
+        "address-pool",
+        "address",
+        "update",
+        "--resource-group",
+        resource_group,
+        "--lb-name",
+        lb_name,
+        "--pool-name",
+        "BackendPool",
+        "--name",
+        backend_name,
+        "--vnet",
+        vnet_name,
+        "--ip-address",
+        ip_address,
+        "--subnet",
+        subnet_name,
+    ]
+
+
+EPILOG = textwrap.dedent(
+    """
+Example usage:
+
+Deploy a container into a new vnet (deploy1-vnet/default) with a public IP:
+deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy1 --ssh-key ~/.ssh/id_rsa.pub --create-vnet False
+
+Deploy 5 large containers into a new vnet with a NAT gateway:
+deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy2 --cpus 64 --ram 256 --num-containers 5 --vnet-subnet myvnet/mysubnet
+
+Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
+deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
+"""
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Start up a ACI deployment with sensible defaults.",
-        epilog=epilog,
+        epilog=EPILOG,
     )
-    parser.add_argument(
-        "--image", help="The image to use for all containers", required=True
-    )
+    parser.add_argument("--image", help="The image to use for all containers")
     parser.add_argument(
         "--azure-auth", help="Use az command to do authentication", action="store_true"
     )
@@ -109,81 +271,105 @@ if __name__ == "__main__":
         help="The name for the deployment",
         default=default_container_name(),
     )
-
     parser.add_argument(
         "--region",
         help="The region to use for the container",
         default="northeurope",
     )
-
     parser.add_argument(
         "--cpus",
         type=int,
         help="The number of CPUs to allocate to each container",
         default=4,
     )
-
     parser.add_argument(
         "--ram",
         type=int,
         help="The amount of RAM (GB) to allocate to each container",
         default=16,
     )
-
     parser.add_argument(
         "--tcb-ports",
         type=str,
         help="Comma separated list of ports to open on each container",
         default="22",
     )
-
     parser.add_argument(
         "--udp-ports",
         type=str,
         help="Comma separated list of ports to open on each container",
         default=None,
     )
-
     parser.add_argument(
         "--create-vnet",
         help="Create a new VNet for the deployment",
         default=True,
     )
-
     parser.add_argument(
         "--vnet-subnet",
         type=str,
         help="The name of the vnet and subnet to use, in the form vnet/subnet. If not specified, and --create-vnet is set, it will use <name>-vnet/default",
         default=None,
     )
-
     parser.add_argument(
         "--create-nat",
         help="Create a NAT gateway for the VNet",
         default=True,
     )
-
     parser.add_argument(
         "--num-containers",
         type=int,
         default=1,
         help="Number of container groups to deploy",
     )
-
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the ARM template and exit",
     )
-
+    parser.add_argument(
+        "--sku",
+        choices=["confidential", "standard"],
+        default="confidential",
+        help="ACI SKU to deploy",
+    )
+    parser.add_argument(
+        "--access-mode",
+        choices=["exec", "ssh-lb"],
+        default="exec",
+        help="How to access deployed containers",
+    )
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "--delete",
+        action="store_true",
+        help="Delete the deployment resources",
+    )
+    return parser
 
-    args = parser.parse_args()
 
-    if args.create_nat is True and args.create_vnet is not True:
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if not args.delete and not args.image:
+        parser.error("--image is required unless --delete is set")
+
+    if args.access_mode == "ssh-lb" and not args.delete and not args.ssh_key:
+        parser.error("--access-mode ssh-lb requires --ssh-key")
+
+    if (
+        args.access_mode == "ssh-lb"
+        and args.create_vnet is not True
+        and args.vnet_subnet is None
+    ):
+        parser.error("--access-mode ssh-lb requires VNet mode")
+
+    if not args.delete and args.create_nat is True and args.create_vnet is not True:
         print("Error: --create-nat requires --create-vnet")
         sys.exit(1)
 
+
+def build_generated_resources(
+    args: argparse.Namespace,
+) -> tuple[list, dict[str, str | None]]:
     resources = []
 
     if args.create_vnet is True:
@@ -202,7 +388,6 @@ if __name__ == "__main__":
             [_, _, vnet] = new_res
             resources.extend(new_res)
         else:
-            print(f"Creating new VNet: {vnet_name}/{subnet_name}")
             vnet = tb.ResourceVNet(
                 name=vnet_name,
                 region=args.region,
@@ -225,7 +410,6 @@ if __name__ == "__main__":
             resources.append(vnet)
 
     elif args.vnet_subnet is not None:
-        print(f"Using existing VNet/Subnet: {args.vnet_subnet}")
         vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
         vnet = tb.ResourceVNet(
             name=vnet_name,
@@ -234,12 +418,16 @@ if __name__ == "__main__":
             subnets=[
                 tb.VNetSubnet(
                     name=subnet_name, address_prefix=""
-                )  # address_prefix is ignored
+                )
             ],
+            existing=True,
+            emit_dependency=args.access_mode != "ssh-lb",
         )
-        resources.append(vnet)
+        if args.access_mode != "ssh-lb":
+            resources.append(vnet)
     else:
-        print("No VNet specified, deploying with public IP")
+        vnet_name = None
+        subnet_name = None
         vnet = None
 
     ports = []
@@ -253,9 +441,14 @@ if __name__ == "__main__":
             ports.append({"protocol": "UDP", "port": int(p)})
 
     for cidx in range(args.num_containers):
+        container_group_name = f"{args.name}-{cidx + 1}"
+        private_ip_address = None
+        if args.access_mode == "ssh-lb":
+            private_ip_address = requested_private_ip_for_index(cidx)
+
         resources.append(
             tb.ResourceACIGroup(
-                f"{args.name}-{cidx + 1}",
+                container_group_name,
                 args.region,
                 sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
                 containers=[
@@ -267,9 +460,298 @@ if __name__ == "__main__":
                         ports=ports,
                     )
                 ],
+                sku=args.sku,
                 vnet=vnet,
+                private_ip_address=private_ip_address,
             ),
         )
+
+        if args.access_mode == "ssh-lb":
+            load_balancer_ip = tb.ResourcePublicIP(
+                name=load_balancer_public_ip_name(container_group_name),
+                region=args.region,
+                sku="Standard",
+                allocation_method="Static",
+            )
+            resources.extend(
+                [
+                    load_balancer_ip,
+                    tb.ResourceLoadBalancer(
+                        name=load_balancer_name(container_group_name),
+                        region=args.region,
+                        public_ip=load_balancer_ip,
+                        vnet_name=vnet.name,
+                        subnet_name=vnet.subnets[0].name,
+                        backend_private_ip=private_ip_address,
+                        depends_on_vnet=not vnet.existing or vnet.emit_dependency,
+                    ),
+                ]
+            )
+
+    return resources, {
+        "vnet_name": vnet_name,
+        "subnet_name": subnet_name,
+    }
+
+
+DELETE_PHASE_LABELS = [
+    "containerGroups",
+    "natGateways",
+    "natPublicIps",
+    "loadBalancers",
+    "loadBalancerPublicIps",
+    "virtualNetworks",
+]
+
+
+def build_delete_phase_membership(resources: list) -> dict[str, set[str]]:
+    membership = {
+        "natPublicIps": set(),
+        "loadBalancerPublicIps": set(),
+        "existingVirtualNetworks": set(),
+    }
+
+    for resource in resources:
+        if isinstance(resource, tb.ResourceNAT):
+            membership["natPublicIps"].add(resource.public_ip.name)
+        elif isinstance(resource, tb.ResourceLoadBalancer):
+            membership["loadBalancerPublicIps"].add(resource.public_ip.name)
+        elif isinstance(resource, tb.ResourceVNet) and resource.existing:
+            membership["existingVirtualNetworks"].add(resource.name)
+
+    return membership
+
+
+def build_delete_plan(resources: list) -> list[dict[str, list[dict[str, str]] | str]]:
+    phases: dict[str, list[dict[str, str]]] = {label: [] for label in DELETE_PHASE_LABELS}
+    membership = build_delete_phase_membership(resources)
+
+    for resource in resources:
+        item = resource.to_dict()
+        resource_type = item["type"]
+        name = item["name"]
+
+        if resource_type == "Microsoft.ContainerInstance/containerGroups":
+            phases["containerGroups"].append({"type": resource_type, "name": name})
+        elif resource_type == "Microsoft.Network/natGateways":
+            phases["natGateways"].append({"type": resource_type, "name": name})
+        elif resource_type == "Microsoft.Network/loadBalancers":
+            phases["loadBalancers"].append({"type": resource_type, "name": name})
+        elif resource_type == "Microsoft.Network/publicIPAddresses":
+            if name in membership["loadBalancerPublicIps"]:
+                phases["loadBalancerPublicIps"].append({"type": resource_type, "name": name})
+            elif name in membership["natPublicIps"]:
+                phases["natPublicIps"].append({"type": resource_type, "name": name})
+        elif resource_type == "Microsoft.Network/virtualNetworks":
+            if name not in membership["existingVirtualNetworks"]:
+                phases["virtualNetworks"].append({"type": resource_type, "name": name})
+
+    return [{"label": label, "resources": phases[label]} for label in DELETE_PHASE_LABELS]
+
+
+class ResourceAlreadyMissing(Exception):
+    pass
+
+
+def azure_delete_command(resource_group: str, resource_type: str, name: str) -> list[str]:
+    return [
+        "az",
+        "resource",
+        "delete",
+        "--resource-group",
+        resource_group,
+        "--resource-type",
+        resource_type,
+        "--name",
+        name,
+    ]
+
+
+def is_missing_resource_delete_error(
+    stderr: str, resource_group: str, resource_type: str, name: str
+) -> bool:
+    stderr_lower = stderr.lower()
+    if "resourcegroupnotfound" in stderr_lower or "subscriptionnotfound" in stderr_lower:
+        return False
+
+    resource_name = f"{resource_type}/{name}".lower()
+    if "resourcenotfound" in stderr_lower and resource_name in stderr_lower:
+        return True
+
+    if (
+        resource_name in stderr_lower
+        and f"resource group '{resource_group.lower()}'" in stderr_lower
+        and "was not found" in stderr_lower
+    ):
+        return True
+
+    return False
+
+
+def delete_azure_resource(resource_group: str, resource_type: str, name: str) -> None:
+    command = azure_delete_command(resource_group, resource_type, name)
+    print(shlex.join(command))
+    result = run(command, check=False, capture_output=True, text=True)
+    stderr = result.stderr or ""
+    if result.returncode == 0:
+        return
+    if is_missing_resource_delete_error(stderr, resource_group, resource_type, name):
+        raise ResourceAlreadyMissing(name)
+    raise CalledProcessError(
+        result.returncode,
+        command,
+        output=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def execute_delete_plan(
+    resource_group: str, phases: list[dict[str, list[dict[str, str]] | str]]
+) -> list[str]:
+    failures = []
+    for phase in phases:
+        for resource in phase["resources"]:
+            try:
+                delete_azure_resource(resource_group, resource["type"], resource["name"])
+            except ResourceAlreadyMissing:
+                print(f"Skipping missing resource: {resource['name']}")
+            except CalledProcessError as exc:
+                failures.append(resource["name"])
+                print(f"Delete failed for {resource['name']}: {exc}")
+                print(f"stdout: {exc.output}")
+                print(f"stderr: {exc.stderr}")
+        time.sleep(5)
+    return failures
+
+
+def render_delete_command(args: argparse.Namespace) -> list[str]:
+    command = [
+        "deploy-aci",
+        "--resource-group",
+        args.resource_group,
+        "--name",
+        args.name,
+    ]
+
+    if args.num_containers != 1:
+        command.extend(["--num-containers", str(args.num_containers)])
+    if args.create_vnet is not True:
+        command.extend(["--create-vnet", "False"])
+    elif args.create_nat is not True:
+        command.extend(["--create-nat", "False"])
+    if args.vnet_subnet is not None:
+        command.extend(["--vnet-subnet", args.vnet_subnet])
+    if args.access_mode != "exec":
+        command.extend(["--access-mode", args.access_mode])
+
+    command.append("--delete")
+    return command
+
+
+def print_resource_topology_message(
+    args: argparse.Namespace, context: dict[str, str | None]
+) -> None:
+    if args.create_vnet is True:
+        if args.create_nat is True:
+            print(
+                f"Creating new VNet: {context['vnet_name']}/{context['subnet_name']} with NAT {args.name}-nat"
+            )
+        else:
+            print(f"Creating new VNet: {context['vnet_name']}/{context['subnet_name']}")
+    elif args.vnet_subnet is not None:
+        print(f"Using existing VNet/Subnet: {args.vnet_subnet}")
+    else:
+        print("No VNet specified, deploying with public IP")
+
+
+def print_post_deploy_access(
+    resource_group: str,
+    deployment_name: str,
+    num_containers: int,
+    access_mode: str,
+    ssh_key_path: str | None,
+    vnet_name: str | None,
+    subnet_name: str | None,
+    delete_command: list[str] | None = None,
+) -> None:
+    print("Deployed")
+    for cidx in range(num_containers):
+        container_group_name = f"{deployment_name}-{cidx + 1}"
+
+        if access_mode == "exec":
+            print(f"Connect to container {cidx + 1} using:")
+            print(
+                f"az container exec --resource-group {resource_group} --name {container_group_name} --exec-command /bin/bash"
+            )
+            print("")
+            continue
+
+        requested_ip = requested_private_ip_for_index(cidx)
+        lb_name = load_balancer_name(container_group_name)
+        try:
+            actual_ip = get_container_group_private_ip(resource_group, container_group_name)
+        except CalledProcessError:
+            actual_ip = None
+            print(
+                f"Warning: unable to determine actual private IP for {container_group_name}. Skipping load balancer backend update."
+            )
+
+        if actual_ip == "":
+            actual_ip = None
+            print(
+                f"Warning: {container_group_name} did not report a private IP. Skipping load balancer backend update."
+            )
+
+        backend_name = load_balancer_backend_address_name(lb_name)
+
+        if actual_ip is not None:
+            if actual_ip != requested_ip:
+                print(
+                    f"Warning: {container_group_name} requested private IP {requested_ip} but Azure assigned {actual_ip}. Registering actual IP in load balancer backend address."
+                )
+
+            add_load_balancer_backend_address(
+                resource_group,
+                lb_name,
+                backend_name,
+                actual_ip,
+                vnet_name,
+                subnet_name,
+            )
+        else:
+            print(
+                f"Warning: backend address registration skipped for {container_group_name} because no private IP was available."
+            )
+
+        print(f"Connect to container {cidx + 1} using:")
+        public_ip_name = load_balancer_public_ip_name(container_group_name)
+        ssh_command = f"ssh -i {ssh_key_path} root@<public-ip> -p 22"
+        try:
+            public_ip = get_public_ip_address(resource_group, public_ip_name)
+            print(f"ssh -i {ssh_key_path} root@{public_ip} -p 22")
+        except CalledProcessError:
+            print(
+                f"Resolve public IP resource {public_ip_name} manually, then run: {ssh_command}"
+            )
+        print("")
+
+    if delete_command is not None:
+        print("Cleanup command:")
+        print(shlex.join(delete_command))
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    validate_args(parser, args)
+
+    resources, context = build_generated_resources(args)
+
+    if args.delete:
+        failures = execute_delete_plan(args.resource_group, build_delete_plan(resources))
+        sys.exit(1 if failures else 0)
+
+    print_resource_topology_message(args, context)
 
     deployment = tb.ARMTemplate(resources)
 
@@ -295,26 +777,37 @@ if __name__ == "__main__":
         print(shlex.join(az_cmd))
         run(az_cmd, check=True)
 
+    delete_command = render_delete_command(args)
+
     if args.create_vnet is True or args.vnet_subnet is not None:
-        print(f"Deployed")
-        for cidx in range(args.num_containers):
-            print(f"Connect to container {cidx + 1} using:")
-            print(
-                f"az container exec --resource-group {args.resource_group} --name {args.name}-{cidx + 1} --exec-command /bin/bash"
-            )
-            print("")
+        print_post_deploy_access(
+            resource_group=args.resource_group,
+            deployment_name=args.name,
+            num_containers=args.num_containers,
+            access_mode=args.access_mode,
+            ssh_key_path=args.ssh_key,
+            vnet_name=context["vnet_name"],
+            subnet_name=context["subnet_name"],
+            delete_command=delete_command,
+        )
     else:
         for cidx in range(args.num_containers):
-          run(
-              [
-                  "az",
-                  "container",
-                  "show",
-                  "--resource-group",
-                  args.resource_group,
-                  "--name",
-                  f"{args.name}-{cidx + 1}",
-                  "--query",
-                  "ipAddress.ip",
-              ]
-          )
+            run(
+                [
+                    "az",
+                    "container",
+                    "show",
+                    "--resource-group",
+                    args.resource_group,
+                    "--name",
+                    f"{args.name}-{cidx + 1}",
+                    "--query",
+                    "ipAddress.ip",
+                ]
+            )
+        print("Cleanup command:")
+        print(shlex.join(delete_command))
+
+
+if __name__ == "__main__":
+    main()

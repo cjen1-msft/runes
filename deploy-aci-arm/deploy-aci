@@ -462,9 +462,9 @@ DELETE_PHASE_LABELS = [
     "containerGroups",
     "natGateways",
     "natPublicIps",
+    "virtualNetworks",
     "loadBalancers",
     "loadBalancerPublicIps",
-    "virtualNetworks",
 ]
 
 
@@ -582,6 +582,8 @@ def execute_delete_plan(
             except CalledProcessError as exc:
                 failures.append(resource["name"])
                 print(f"Delete failed for {resource['name']}: {exc}")
+                print(f"stdout: {exc.output}")
+                print(f"stderr: {exc.stderr}")
     return failures
 
 

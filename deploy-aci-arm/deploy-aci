@@ -4,6 +4,7 @@ import argparse
 import sys
 import os
 import shlex
+import time
 import arm_template_builder as tb
 import tempfile
 import textwrap
@@ -120,6 +121,41 @@ def update_load_balancer_backend_address(
             "address-pool",
             "address",
             "update",
+            "--resource-group",
+            resource_group,
+            "--lb-name",
+            lb_name,
+            "--pool-name",
+            "BackendPool",
+            "--name",
+            backend_name,
+            "--vnet",
+            vnet_name,
+            "--ip-address",
+            ip_address,
+            "--subnet",
+            subnet_name,
+        ],
+        check=True,
+    )
+
+
+def add_load_balancer_backend_address(
+    resource_group: str,
+    lb_name: str,
+    backend_name: str,
+    ip_address: str,
+    vnet_name: str,
+    subnet_name: str,
+) -> None:
+    run(
+        [
+            "az",
+            "network",
+            "lb",
+            "address-pool",
+            "address",
+            "add",
             "--resource-group",
             resource_group,
             "--lb-name",
@@ -462,9 +498,9 @@ DELETE_PHASE_LABELS = [
     "containerGroups",
     "natGateways",
     "natPublicIps",
-    "virtualNetworks",
     "loadBalancers",
     "loadBalancerPublicIps",
+    "virtualNetworks",
 ]
 
 
@@ -584,6 +620,7 @@ def execute_delete_plan(
                 print(f"Delete failed for {resource['name']}: {exc}")
                 print(f"stdout: {exc.output}")
                 print(f"stderr: {exc.stderr}")
+        time.sleep(5)
     return failures
 
 
@@ -667,34 +704,24 @@ def print_post_deploy_access(
 
         backend_name = load_balancer_backend_address_name(lb_name)
 
-        if actual_ip and actual_ip != requested_ip:
-            print(
-                f"Warning: {container_group_name} requested private IP {requested_ip} but Azure assigned {actual_ip}. Updating load balancer backend address."
-            )
-            try:
-                update_load_balancer_backend_address(
-                    resource_group,
-                    lb_name,
-                    backend_name,
-                    actual_ip,
-                    vnet_name,
-                    subnet_name,
-                )
-            except CalledProcessError:
-                print("Load balancer backend update failed.")
+        if actual_ip is not None:
+            if actual_ip != requested_ip:
                 print(
-                    "Manual retry: "
-                    + shlex.join(
-                        load_balancer_backend_update_command(
-                            resource_group,
-                            lb_name,
-                            backend_name,
-                            actual_ip,
-                            vnet_name,
-                            subnet_name,
-                        )
-                    )
+                    f"Warning: {container_group_name} requested private IP {requested_ip} but Azure assigned {actual_ip}. Registering actual IP in load balancer backend address."
                 )
+
+            add_load_balancer_backend_address(
+                resource_group,
+                lb_name,
+                backend_name,
+                actual_ip,
+                vnet_name,
+                subnet_name,
+            )
+        else:
+            print(
+                f"Warning: backend address registration skipped for {container_group_name} because no private IP was available."
+            )
 
         print(f"Connect to container {cidx + 1} using:")
         public_ip_name = load_balancer_public_ip_name(container_group_name)

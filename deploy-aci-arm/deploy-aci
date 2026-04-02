@@ -9,6 +9,7 @@ import tempfile
 import textwrap
 
 from subprocess import run, PIPE
+from subprocess import CalledProcessError
 
 from enum import Enum
 
@@ -68,7 +69,216 @@ def new_vnet_with_nat(
     return [pub_ip, nat_gateway, vnet]
 
 
-if __name__ == "__main__":
+def requested_private_ip_for_index(container_index: int) -> str:
+    return f"10.0.0.{container_index + 4}"
+
+
+def load_balancer_name(container_group_name: str) -> str:
+    return f"{container_group_name}-lb"
+
+
+def load_balancer_public_ip_name(container_group_name: str) -> str:
+    return f"{container_group_name}-lb-ip"
+
+
+def load_balancer_backend_address_name(lb_name: str) -> str:
+    return f"{lb_name}-backend-address"
+
+
+def get_container_group_private_ip(resource_group: str, container_group_name: str) -> str:
+    result = run(
+        [
+            "az",
+            "container",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            container_group_name,
+            "--query",
+            "ipAddress.ip",
+            "-o",
+            "tsv",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def update_load_balancer_backend_address(
+    resource_group: str,
+    lb_name: str,
+    backend_name: str,
+    ip_address: str,
+    vnet_name: str,
+    subnet_name: str,
+) -> None:
+    run(
+        [
+            "az",
+            "network",
+            "lb",
+            "address-pool",
+            "address",
+            "update",
+            "--resource-group",
+            resource_group,
+            "--lb-name",
+            lb_name,
+            "--pool-name",
+            "BackendPool",
+            "--name",
+            backend_name,
+            "--vnet",
+            vnet_name,
+            "--ip-address",
+            ip_address,
+            "--subnet",
+            subnet_name,
+        ],
+        check=True,
+    )
+
+
+def get_public_ip_address(resource_group: str, public_ip_name: str) -> str:
+    result = run(
+        [
+            "az",
+            "network",
+            "public-ip",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            public_ip_name,
+            "--query",
+            "ipAddress",
+            "-o",
+            "tsv",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def load_balancer_backend_update_command(
+    resource_group: str,
+    lb_name: str,
+    backend_name: str,
+    ip_address: str,
+    vnet_name: str,
+    subnet_name: str,
+) -> list[str]:
+    return [
+        "az",
+        "network",
+        "lb",
+        "address-pool",
+        "address",
+        "update",
+        "--resource-group",
+        resource_group,
+        "--lb-name",
+        lb_name,
+        "--pool-name",
+        "BackendPool",
+        "--name",
+        backend_name,
+        "--vnet",
+        vnet_name,
+        "--ip-address",
+        ip_address,
+        "--subnet",
+        subnet_name,
+    ]
+
+
+def print_post_deploy_access(
+    resource_group: str,
+    deployment_name: str,
+    num_containers: int,
+    access_mode: str,
+    ssh_key_path: str | None,
+    vnet_name: str | None,
+    subnet_name: str | None,
+) -> None:
+    print("Deployed")
+    for cidx in range(num_containers):
+        container_group_name = f"{deployment_name}-{cidx + 1}"
+
+        if access_mode == "exec":
+            print(f"Connect to container {cidx + 1} using:")
+            print(
+                f"az container exec --resource-group {resource_group} --name {container_group_name} --exec-command /bin/bash"
+            )
+            print("")
+            continue
+
+        requested_ip = requested_private_ip_for_index(cidx)
+        lb_name = load_balancer_name(container_group_name)
+        try:
+            actual_ip = get_container_group_private_ip(resource_group, container_group_name)
+        except CalledProcessError:
+            actual_ip = None
+            print(
+                f"Warning: unable to determine actual private IP for {container_group_name}. Skipping load balancer backend update."
+            )
+
+        if actual_ip == "":
+            actual_ip = None
+            print(
+                f"Warning: {container_group_name} did not report a private IP. Skipping load balancer backend update."
+            )
+
+        backend_name = load_balancer_backend_address_name(lb_name)
+
+        if actual_ip and actual_ip != requested_ip:
+            print(
+                f"Warning: {container_group_name} requested private IP {requested_ip} but Azure assigned {actual_ip}. Updating load balancer backend address."
+            )
+            try:
+                update_load_balancer_backend_address(
+                    resource_group,
+                    lb_name,
+                    backend_name,
+                    actual_ip,
+                    vnet_name,
+                    subnet_name,
+                )
+            except CalledProcessError:
+                print("Load balancer backend update failed.")
+                print(
+                    "Manual retry: "
+                    + shlex.join(
+                        load_balancer_backend_update_command(
+                            resource_group,
+                            lb_name,
+                            backend_name,
+                            actual_ip,
+                            vnet_name,
+                            subnet_name,
+                        )
+                    )
+                )
+
+        print(f"Connect to container {cidx + 1} using:")
+        public_ip_name = load_balancer_public_ip_name(container_group_name)
+        ssh_command = f"ssh -i {ssh_key_path} root@<public-ip> -p 22"
+        try:
+            public_ip = get_public_ip_address(resource_group, public_ip_name)
+            print(f"ssh -i {ssh_key_path} root@{public_ip} -p 22")
+        except CalledProcessError:
+            print(
+                f"Resolve public IP resource {public_ip_name} manually, then run: {ssh_command}"
+            )
+        print("")
+
+
+def main() -> None:
     epilog = textwrap.dedent(
         """
     Example usage:
@@ -176,9 +386,33 @@ if __name__ == "__main__":
         help="Print the ARM template and exit",
     )
 
+    parser.add_argument(
+        "--sku",
+        choices=["confidential", "standard"],
+        default="confidential",
+        help="ACI SKU to deploy",
+    )
+
+    parser.add_argument(
+        "--access-mode",
+        choices=["exec", "ssh-lb"],
+        default="exec",
+        help="How to access deployed containers",
+    )
+
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
+
+    if args.access_mode == "ssh-lb" and not args.ssh_key:
+        parser.error("--access-mode ssh-lb requires --ssh-key")
+
+    if (
+        args.access_mode == "ssh-lb"
+        and args.create_vnet is not True
+        and args.vnet_subnet is None
+    ):
+        parser.error("--access-mode ssh-lb requires VNet mode")
 
     if args.create_nat is True and args.create_vnet is not True:
         print("Error: --create-nat requires --create-vnet")
@@ -236,10 +470,15 @@ if __name__ == "__main__":
                     name=subnet_name, address_prefix=""
                 )  # address_prefix is ignored
             ],
+            existing=True,
+            emit_dependency=args.access_mode != "ssh-lb",
         )
-        resources.append(vnet)
+        if args.access_mode != "ssh-lb":
+            resources.append(vnet)
     else:
         print("No VNet specified, deploying with public IP")
+        vnet_name = None
+        subnet_name = None
         vnet = None
 
     ports = []
@@ -253,9 +492,14 @@ if __name__ == "__main__":
             ports.append({"protocol": "UDP", "port": int(p)})
 
     for cidx in range(args.num_containers):
+        container_group_name = f"{args.name}-{cidx + 1}"
+        private_ip_address = None
+        if args.access_mode == "ssh-lb":
+            private_ip_address = requested_private_ip_for_index(cidx)
+
         resources.append(
             tb.ResourceACIGroup(
-                f"{args.name}-{cidx + 1}",
+                container_group_name,
                 args.region,
                 sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
                 containers=[
@@ -267,9 +511,33 @@ if __name__ == "__main__":
                         ports=ports,
                     )
                 ],
+                sku=args.sku,
                 vnet=vnet,
+                private_ip_address=private_ip_address,
             ),
         )
+
+        if args.access_mode == "ssh-lb":
+            load_balancer_ip = tb.ResourcePublicIP(
+                name=load_balancer_public_ip_name(container_group_name),
+                region=args.region,
+                sku="Standard",
+                allocation_method="Static",
+            )
+            resources.extend(
+                [
+                    load_balancer_ip,
+                    tb.ResourceLoadBalancer(
+                        name=load_balancer_name(container_group_name),
+                        region=args.region,
+                        public_ip=load_balancer_ip,
+                        vnet_name=vnet.name,
+                        subnet_name=vnet.subnets[0].name,
+                        backend_private_ip=private_ip_address,
+                        depends_on_vnet=not vnet.existing or vnet.emit_dependency,
+                    ),
+                ]
+            )
 
     deployment = tb.ARMTemplate(resources)
 
@@ -296,25 +564,31 @@ if __name__ == "__main__":
         run(az_cmd, check=True)
 
     if args.create_vnet is True or args.vnet_subnet is not None:
-        print(f"Deployed")
-        for cidx in range(args.num_containers):
-            print(f"Connect to container {cidx + 1} using:")
-            print(
-                f"az container exec --resource-group {args.resource_group} --name {args.name}-{cidx + 1} --exec-command /bin/bash"
-            )
-            print("")
+        print_post_deploy_access(
+            resource_group=args.resource_group,
+            deployment_name=args.name,
+            num_containers=args.num_containers,
+            access_mode=args.access_mode,
+            ssh_key_path=args.ssh_key,
+            vnet_name=vnet_name,
+            subnet_name=subnet_name,
+        )
     else:
         for cidx in range(args.num_containers):
-          run(
-              [
-                  "az",
-                  "container",
-                  "show",
-                  "--resource-group",
-                  args.resource_group,
-                  "--name",
-                  f"{args.name}-{cidx + 1}",
-                  "--query",
-                  "ipAddress.ip",
-              ]
-          )
+            run(
+                [
+                    "az",
+                    "container",
+                    "show",
+                    "--resource-group",
+                    args.resource_group,
+                    "--name",
+                    f"{args.name}-{cidx + 1}",
+                    "--query",
+                    "ipAddress.ip",
+                ]
+            )
+
+
+if __name__ == "__main__":
+    main()

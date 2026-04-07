@@ -620,7 +620,6 @@ def execute_delete_plan(
                 print(f"Delete failed for {resource['name']}: {exc}")
                 print(f"stdout: {exc.output}")
                 print(f"stderr: {exc.stderr}")
-        time.sleep(5)
     return failures
 
 

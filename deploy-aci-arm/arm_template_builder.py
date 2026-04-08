@@ -343,7 +343,7 @@ class CACI:
         default_factory=list
     )  # list of {"protocol": "TCP", "port": 22} dicts
 
-    def to_dict(self, ssh_key=None):
+    def to_dict(self, ssh_key=None, volume_mounts=None):
         cmd_prefix = "echo Fabric_NodeIPOrFQDN=$Fabric_NodeIPOrFQDN >> /aci_env && echo UVM_SECURITY_CONTEXT_DIR=$UVM_SECURITY_CONTEXT_DIR >> /aci_env && mkdir -p /root/.ssh/ && gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY && tdnf update -y && tdnf install -y openssh-server ca-certificates"
         if ssh_key is None:
             cmd = ["/bin/sh", "-c", f"{cmd_prefix} && tail -f /dev/null"]
@@ -367,7 +367,7 @@ class CACI:
                 "command": cmd,
                 "ports": ports,
                 "environmentVariables": env,
-                "volumeMounts": [],
+                "volumeMounts": volume_mounts or [],
                 "resources": {
                     "requests": {
                         "cpu": self.cpu,
@@ -378,6 +378,33 @@ class CACI:
                     "privileged": self.privileged,
                 }
             },
+        }
+
+
+@dataclass(frozen=True)
+class AzureFileMount:
+    storage_account_name: str
+    share_name: str
+    volume_name: str
+    mount_path: str
+    storage_account_key_parameter: str
+    read_only: bool = False
+
+    def volume_dict(self):
+        return {
+            "name": self.volume_name,
+            "azureFile": {
+                "shareName": self.share_name,
+                "storageAccountName": self.storage_account_name,
+                "storageAccountKey": f"[parameters('{self.storage_account_key_parameter}')]",
+            },
+        }
+
+    def volume_mount_dict(self):
+        return {
+            "name": self.volume_name,
+            "mountPath": self.mount_path,
+            "readOnly": self.read_only,
         }
 
 
@@ -392,6 +419,7 @@ class ResourceACIGroup:
     sku: str = ACI_SKU_CONFIDENTIAL
     vnet: ResourceVNet | None = None
     private_ip_address: str | None = None
+    azure_file_mount: AzureFileMount | None = None
 
     def to_dict(self):
         depends_on = []
@@ -406,8 +434,22 @@ class ResourceACIGroup:
             "restartPolicy": "Never",
             "osType": "Linux",
             "ipAddress": ip_address,
-            "volumes": [],
-            "containers": [container.to_dict(self.sshkey) for container in self.containers],
+            "volumes": (
+                [self.azure_file_mount.volume_dict()]
+                if self.azure_file_mount is not None
+                else []
+            ),
+            "containers": [
+                container.to_dict(
+                    self.sshkey,
+                    volume_mounts=(
+                        [self.azure_file_mount.volume_mount_dict()]
+                        if self.azure_file_mount is not None
+                        else []
+                    ),
+                )
+                for container in self.containers
+            ],
         }
         if self.acr_creds:
             image_crds = {
@@ -455,14 +497,15 @@ class ResourceACIGroup:
 
 
 class ARMTemplate:
-    def __init__(self, resources):
+    def __init__(self, resources, parameters=None):
         self.resources = resources
+        self.parameters = parameters or {}
 
     def to_dict(self):
         return {
             "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
             "contentVersion": "1.0.0.0",
-            "parameters": {},
+            "parameters": self.parameters,
             "variables": {},
             "resources": [resource.to_dict() for resource in self.resources],
         }

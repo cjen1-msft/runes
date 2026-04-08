@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import sys
 import os
 import shlex
@@ -15,9 +16,101 @@ from subprocess import CalledProcessError
 from enum import Enum
 
 
+AZURE_FILE_STORAGE_KEY_PARAMETER = "azureFileStorageAccountKey"
+
+
+class AzureFileMountConfig:
+    def __init__(
+        self,
+        storage_account_name: str,
+        share_name: str,
+        mount_path: str,
+        storage_account_key: str,
+        volume_name: str = "azurefiles",
+    ):
+        self.storage_account_name = storage_account_name
+        self.share_name = share_name
+        self.mount_path = mount_path
+        self.storage_account_key = storage_account_key
+        self.volume_name = volume_name
+
+    def template_mount(self) -> tb.AzureFileMount:
+        return tb.AzureFileMount(
+            storage_account_name=self.storage_account_name,
+            share_name=self.share_name,
+            volume_name=self.volume_name,
+            mount_path=self.mount_path,
+            storage_account_key_parameter=AZURE_FILE_STORAGE_KEY_PARAMETER,
+        )
+
+
 def get_ssh_key(ssh_key):
     with open(os.path.expanduser(ssh_key), "r") as f:
         return f.read().strip()
+
+
+def get_secret_file_contents(path: str) -> str:
+    with open(os.path.expanduser(path), "r") as f:
+        return f.read().strip()
+
+
+def build_azure_file_mount_config(args: argparse.Namespace) -> AzureFileMountConfig | None:
+    azure_file_fields = [
+        args.azure_file_storage_account,
+        args.azure_file_share,
+        args.azure_file_mount_path,
+        args.azure_file_account_key_file,
+    ]
+    if not any(field is not None for field in azure_file_fields):
+        return None
+
+    storage_account_name = args.azure_file_storage_account.strip()
+    share_name = args.azure_file_share.strip()
+    mount_path = args.azure_file_mount_path.strip()
+    storage_account_key = get_secret_file_contents(args.azure_file_account_key_file)
+    return AzureFileMountConfig(
+        storage_account_name=storage_account_name,
+        share_name=share_name,
+        mount_path=mount_path,
+        storage_account_key=storage_account_key,
+    )
+
+
+def arm_parameters_for_mount(mount_config: AzureFileMountConfig | None) -> dict:
+    if mount_config is None:
+        return {}
+    return {
+        AZURE_FILE_STORAGE_KEY_PARAMETER: {
+            "type": "secureString",
+            "metadata": {
+                "description": "Storage account key for Azure Files mount"
+            }
+        }
+    }
+
+
+def arm_parameter_values_for_mount(mount_config: AzureFileMountConfig | None) -> dict:
+    if mount_config is None:
+        return {}
+    return {
+        AZURE_FILE_STORAGE_KEY_PARAMETER: {
+            "value": mount_config.storage_account_key,
+        }
+    }
+
+
+def write_parameters_file(tempf, parameter_values: dict) -> None:
+    tempf.write(
+        json.dumps(
+            {
+                "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+                "contentVersion": "1.0.0.0",
+                "parameters": parameter_values,
+            },
+            indent=4,
+        ).encode("utf-8")
+    )
+    tempf.flush()
 
 
 def default_container_name():
@@ -242,6 +335,9 @@ deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy2 
 
 Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
 deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
+
+Deploy a standard ACI container with an Azure Files mount:
+deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy4 --sku standard --azure-file-storage-account mystorage --azure-file-share myshare --azure-file-mount-path /mnt/azure --azure-file-account-key-file ~/.azure/storage-account.key
 """
 )
 
@@ -325,7 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the ARM template and exit",
+        help="Print the ARM template and exit. Secure parameter values are omitted.",
     )
     parser.add_argument(
         "--sku",
@@ -344,6 +440,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--delete",
         action="store_true",
         help="Delete the deployment resources",
+    )
+    parser.add_argument(
+        "--azure-file-storage-account",
+        help="Azure storage account name for an Azure Files mount",
+    )
+    parser.add_argument(
+        "--azure-file-share",
+        help="Azure Files share name to mount",
+    )
+    parser.add_argument(
+        "--azure-file-mount-path",
+        help="Absolute container path for the Azure Files mount",
+    )
+    parser.add_argument(
+        "--azure-file-account-key-file",
+        help="Path to a file containing the Azure storage account key",
     )
     return parser
 
@@ -366,11 +478,48 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         print("Error: --create-nat requires --create-vnet")
         sys.exit(1)
 
+    azure_file_args = {
+        "--azure-file-storage-account": args.azure_file_storage_account,
+        "--azure-file-share": args.azure_file_share,
+        "--azure-file-mount-path": args.azure_file_mount_path,
+        "--azure-file-account-key-file": args.azure_file_account_key_file,
+    }
+    provided_azure_file_args = {
+        flag: value for flag, value in azure_file_args.items() if value is not None
+    }
+    if provided_azure_file_args:
+        if args.delete:
+            parser.error("Azure Files mount flags cannot be used with --delete")
+        missing_flags = [flag for flag, value in azure_file_args.items() if value is None]
+        if missing_flags:
+            parser.error(
+                "Azure Files mount requires all of: "
+                + ", ".join(azure_file_args.keys())
+            )
+        if args.azure_file_storage_account.strip() == "":
+            parser.error("--azure-file-storage-account cannot be empty")
+        if args.azure_file_share.strip() == "":
+            parser.error("--azure-file-share cannot be empty")
+        mount_path = args.azure_file_mount_path.strip()
+        if mount_path == "":
+            parser.error("--azure-file-mount-path cannot be empty")
+        if not mount_path.startswith("/"):
+            parser.error("--azure-file-mount-path must be an absolute path")
+
+        key_file_path = os.path.expanduser(args.azure_file_account_key_file)
+        if not os.path.isfile(key_file_path):
+            parser.error("--azure-file-account-key-file must point to an existing file")
+        if not os.access(key_file_path, os.R_OK):
+            parser.error("--azure-file-account-key-file must be readable")
+        if get_secret_file_contents(args.azure_file_account_key_file) == "":
+            parser.error("--azure-file-account-key-file cannot be empty")
+
 
 def build_generated_resources(
     args: argparse.Namespace,
 ) -> tuple[list, dict[str, str | None]]:
     resources = []
+    azure_file_mount_config = build_azure_file_mount_config(args)
 
     if args.create_vnet is True:
         if args.vnet_subnet is not None:
@@ -463,6 +612,11 @@ def build_generated_resources(
                 sku=args.sku,
                 vnet=vnet,
                 private_ip_address=private_ip_address,
+                azure_file_mount=(
+                    azure_file_mount_config.template_mount()
+                    if azure_file_mount_config is not None
+                    else None
+                ),
             ),
         )
 
@@ -752,15 +906,22 @@ def main() -> None:
 
     print_resource_topology_message(args, context)
 
-    deployment = tb.ARMTemplate(resources)
+    azure_file_mount_config = build_azure_file_mount_config(args)
+    deployment = tb.ARMTemplate(
+        resources,
+        parameters=arm_parameters_for_mount(azure_file_mount_config),
+    )
 
-    with tempfile.NamedTemporaryFile() as tempf:
+    with tempfile.NamedTemporaryFile() as tempf, tempfile.NamedTemporaryFile() as paramsf:
         dep_json = deployment.to_json()
         if args.dry_run is True:
             print(dep_json)
             exit(0)
         tempf.write(dep_json.encode("utf-8"))
         tempf.flush()
+        parameter_values = arm_parameter_values_for_mount(azure_file_mount_config)
+        if parameter_values:
+            write_parameters_file(paramsf, parameter_values)
 
         az_cmd = [
             "az",
@@ -771,7 +932,9 @@ def main() -> None:
             args.resource_group,
             "--template-file",
             tempf.name,
-        ] + (["--verbose", "--debug"] if args.verbose else [])
+        ] + (
+            ["--parameters", f"@{paramsf.name}"] if parameter_values else []
+        ) + (["--verbose", "--debug"] if args.verbose else [])
         print("Running:")
         print(shlex.join(az_cmd))
         run(az_cmd, check=True)

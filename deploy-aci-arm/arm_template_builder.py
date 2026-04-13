@@ -387,7 +387,7 @@ class AzureFileMount:
     share_name: str
     volume_name: str
     mount_path: str
-    storage_account_key_parameter: str
+    storage_account_key: str
     read_only: bool = False
 
     def volume_dict(self):
@@ -396,7 +396,7 @@ class AzureFileMount:
             "azureFile": {
                 "shareName": self.share_name,
                 "storageAccountName": self.storage_account_name,
-                "storageAccountKey": f"[parameters('{self.storage_account_key_parameter}')]",
+                "storageAccountKey": self.storage_account_key,
             },
         }
 

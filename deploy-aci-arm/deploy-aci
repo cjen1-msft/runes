@@ -1,774 +1,61 @@
 #!/usr/bin/env python3
 
-import argparse
-from dataclasses import dataclass
-import hashlib
-import json
-import sys
-import os
 import shlex
-import time
 import arm_template_builder as tb
 import tempfile
-import textwrap
 
 from subprocess import run
-from subprocess import CalledProcessError
 
-from enum import Enum
-
-
-class AzureFileStorageMode(Enum):
-    EXISTING = "existing"
-    MANAGED = "managed"
-
-
-@dataclass(frozen=True)
-class DeploymentContext:
-    base_resource_group: str
-    deployment_resource_group: str
-    region: str
-
-
-@dataclass(frozen=True)
-class ParsedAzureFileMount:
-    storage_account_name: str | None
-    share_name: str
-    mount_path: str
-    key_file: str | None
-
-
-@dataclass(frozen=True)
-class PlannedAzureFileMount:
-    node_index: int
-    storage_account_name: str
-    share_name: str
-    mount_path: str
-    key_file: str | None
-    delete_share_on_delete: bool
-
-
-@dataclass(frozen=True)
-class AzureFilePlan:
-    storage_mode: AzureFileStorageMode
-    mounts: list[PlannedAzureFileMount]
-    managed_storage_account_name: str | None = None
-
-
-class AzureFileMountConfig:
-    def __init__(
-        self,
-        storage_account_name: str,
-        share_name: str,
-        mount_path: str,
-        storage_account_key_parameter: str,
-        storage_account_key: str | None = None,
-        volume_name: str = "azurefiles",
-    ):
-        self.storage_account_name = storage_account_name
-        self.share_name = share_name
-        self.mount_path = mount_path
-        self.storage_account_key = storage_account_key
-        self.storage_account_key_parameter = storage_account_key_parameter
-        self.volume_name = volume_name
-
-    def template_mount(self) -> tb.AzureFileMount:
-        return tb.AzureFileMount(
-            storage_account_name=self.storage_account_name,
-            share_name=self.share_name,
-            volume_name=self.volume_name,
-            mount_path=self.mount_path,
-            storage_account_key_parameter=self.storage_account_key_parameter,
-        )
-
-
-def get_ssh_key(ssh_key):
-    with open(os.path.expanduser(ssh_key), "r") as f:
-        return f.read().strip()
-
-
-def get_secret_file_contents(path: str) -> str:
-    with open(os.path.expanduser(path), "r") as f:
-        return f.read().strip()
-
-
-def normalize_region_name(region: str) -> str:
-    return region.replace(" ", "").strip().lower()
-
-
-def effective_deployment_resource_group(args: argparse.Namespace) -> str:
-    if not args.deploy_rg:
-        return args.resource_group
-    return f"{args.resource_group}-{args.name}"
-
-
-def build_deployment_context(args: argparse.Namespace) -> DeploymentContext:
-    return DeploymentContext(
-        base_resource_group=args.resource_group,
-        deployment_resource_group=effective_deployment_resource_group(args),
-        region=args.region,
-    )
-
-
-def azure_file_storage_key_parameter_name(node_index: int) -> str:
-    return f"azureFileStorageAccountKeyNode{node_index + 1}"
-
-
-def parse_azure_file_mount_spec(spec: str) -> ParsedAzureFileMount:
-    values: dict[str, str] = {}
-    for entry in spec.split(","):
-        entry = entry.strip()
-        if entry == "":
-            continue
-        key, separator, value = entry.partition("=")
-        if separator == "":
-            raise ValueError(
-                "must use key=value pairs separated by commas"
-            )
-        normalized_key = key.strip()
-        if normalized_key not in {"account", "share", "path", "key-file"}:
-            raise ValueError(f"contains unsupported key '{normalized_key}'")
-        if normalized_key in values:
-            raise ValueError(f"contains duplicate key '{normalized_key}'")
-        values[normalized_key] = value.strip()
-
-    share_name = values.get("share", "").strip()
-    mount_path = values.get("path", "").strip()
-    storage_account_name = values.get("account")
-    if storage_account_name is not None:
-        storage_account_name = storage_account_name.strip() or None
-    key_file = values.get("key-file")
-    if key_file is not None:
-        key_file = key_file.strip() or None
-
-    return ParsedAzureFileMount(
-        storage_account_name=storage_account_name,
-        share_name=share_name,
-        mount_path=mount_path,
-        key_file=key_file,
-    )
-
-
-def validate_parsed_azure_file_mount(
-    parser: argparse.ArgumentParser,
-    mount: ParsedAzureFileMount,
-    mount_index: int,
-) -> None:
-    mount_label = f"--azure-file-mount #{mount_index + 1}"
-    if mount.share_name == "":
-        parser.error(f"{mount_label} requires share=<name>")
-    if mount.mount_path == "":
-        parser.error(f"{mount_label} requires path=<absolute-path>")
-    if not mount.mount_path.startswith("/"):
-        parser.error(f"{mount_label} path must be an absolute path")
-    if mount.storage_account_name is None and mount.key_file is not None:
-        parser.error(
-            f"{mount_label} cannot use key-file=... when account=... is omitted"
-        )
-    if mount.key_file is not None:
-        key_file_path = os.path.expanduser(mount.key_file)
-        if not os.path.isfile(key_file_path):
-            parser.error(f"{mount_label} key-file must point to an existing file")
-        if not os.access(key_file_path, os.R_OK):
-            parser.error(f"{mount_label} key-file must be readable")
-        if get_secret_file_contents(mount.key_file) == "":
-            parser.error(f"{mount_label} key-file cannot be empty")
-
-
-def derived_share_name(share_prefix: str, node_index: int) -> str:
-    return f"{share_prefix.rstrip('-')}-{node_index + 1}"
-
-
-def derived_storage_account_name(context: DeploymentContext, deployment_name: str) -> str:
-    seed = f"{context.deployment_resource_group}-{deployment_name}".lower()
-    sanitized = "".join(ch for ch in seed if ch.isalnum())
-    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:6]
-    prefix = sanitized[:18]
-    name = f"{prefix}{digest}"
-    return (name or f"aci{digest}")[:24]
-
-
-def build_azure_file_plan(
-    args: argparse.Namespace,
-    context: DeploymentContext,
-) -> AzureFilePlan | None:
-    raw_mount_specs = [parse_azure_file_mount_spec(spec) for spec in args.azure_file_mount]
-    if len(raw_mount_specs) == 0:
-        return None
-
-    if len(raw_mount_specs) == 1:
-        mounts_by_node = [raw_mount_specs[0] for _ in range(args.num_containers)]
-    else:
-        mounts_by_node = raw_mount_specs
-
-    if any(
-        mount.storage_account_name is None for mount in mounts_by_node
-    ) and any(mount.storage_account_name is not None for mount in mounts_by_node):
-        raise ValueError(
-            "cannot mix managed and existing storage accounts across --azure-file-mount values"
-        )
-
-    provided_account_names = {
-        mount.storage_account_name
-        for mount in mounts_by_node
-        if mount.storage_account_name is not None
-    }
-    uses_managed_storage = len(provided_account_names) == 0
-    managed_storage_account_name = (
-        derived_storage_account_name(context, args.name) if uses_managed_storage else None
-    )
-    planned_mounts = []
-    for node_index, mount in enumerate(mounts_by_node):
-        storage_account_name = mount.storage_account_name or managed_storage_account_name
-        share_name = (
-            derived_share_name(mount.share_name, node_index)
-            if args.azure_file_share_prefix
-            else mount.share_name
-        )
-        planned_mounts.append(
-            PlannedAzureFileMount(
-                node_index=node_index,
-                storage_account_name=storage_account_name,
-                share_name=share_name,
-                mount_path=mount.mount_path,
-                key_file=mount.key_file,
-                delete_share_on_delete=uses_managed_storage,
-            )
-        )
-
-    return AzureFilePlan(
-        storage_mode=(
-            AzureFileStorageMode.MANAGED
-            if uses_managed_storage
-            else AzureFileStorageMode.EXISTING
-        ),
-        mounts=planned_mounts,
-        managed_storage_account_name=managed_storage_account_name,
-    )
-
-
-def arm_parameters_for_mounts(
-    mount_configs: list[AzureFileMountConfig | None],
-) -> dict[str, dict]:
-    parameters = {}
-    for mount_config in mount_configs:
-        if mount_config is None:
-            continue
-        parameters[mount_config.storage_account_key_parameter] = {
-            "type": "secureString",
-            "metadata": {
-                "description": f"Storage account key for Azure Files mount {mount_config.share_name}"
-            },
-        }
-    return parameters
-
-
-def arm_parameter_values_for_mounts(
-    mount_configs: list[AzureFileMountConfig | None],
-) -> dict[str, dict[str, str]]:
-    values = {}
-    for mount_config in mount_configs:
-        if mount_config is None or mount_config.storage_account_key is None:
-            continue
-        values[mount_config.storage_account_key_parameter] = {
-            "value": mount_config.storage_account_key,
-        }
-    return values
-
-
-def write_parameters_file(tempf, parameter_values: dict) -> None:
-    tempf.write(
-        json.dumps(
-            {
-                "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-                "contentVersion": "1.0.0.0",
-                "parameters": parameter_values,
-            },
-            indent=4,
-        ).encode("utf-8")
-    )
-    tempf.flush()
-
-
-def default_container_name():
-    return f"test-{os.urandom(2).hex()}"
-
-
-def new_vnet_with_nat(
-    vnet_name, subnet_name, nat_name: str, pub_ip_name: str, region: str
-) -> list:
-    pub_ip = tb.ResourcePublicIP(
-        name=pub_ip_name,
-        region=region,
-        sku="Standard",
-        allocation_method="Static",
-    )
-
-    address_space = "10.0.0.0/16"
-
-    nat_gateway = tb.ResourceNAT(
-        name=nat_name,
-        region=region,
-        public_ip=pub_ip,
-        address_space=address_space,
-    )
-
-    vnet = tb.ResourceVNet(
-        name=vnet_name,
-        region=region,
-        address_space=address_space,
-        subnets=[
-            tb.VNetSubnet(
-                name=subnet_name,
-                address_prefix="10.0.0.0/24",
-                nat_gateway=nat_gateway,
-                delegations=[
-                    {
-                        "name": "aci-delegation",
-                        "properties": {
-                            "serviceName": "Microsoft.ContainerInstance/containerGroups"
-                        },
-                    }
-                ],
-            )
-        ],
-    )
-
-    return [pub_ip, nat_gateway, vnet]
-
-
-def requested_private_ip_for_index(container_index: int) -> str:
-    return f"10.0.0.{container_index + 4}"
-
-
-def load_balancer_name(container_group_name: str) -> str:
-    return f"{container_group_name}-lb"
-
-
-def load_balancer_public_ip_name(container_group_name: str) -> str:
-    return f"{container_group_name}-lb-ip"
-
-
-def load_balancer_backend_address_name(lb_name: str) -> str:
-    return f"{lb_name}-backend-address"
-
-
-def get_container_group_private_ip(resource_group: str, container_group_name: str) -> str:
-    result = run(
-        [
-            "az",
-            "container",
-            "show",
-            "--resource-group",
-            resource_group,
-            "--name",
-            container_group_name,
-            "--query",
-            "ipAddress.ip",
-            "-o",
-            "tsv",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def update_load_balancer_backend_address(
-    resource_group: str,
-    lb_name: str,
-    backend_name: str,
-    ip_address: str,
-    vnet_name: str,
-    subnet_name: str,
-) -> None:
-    run(
-        [
-            "az",
-            "network",
-            "lb",
-            "address-pool",
-            "address",
-            "update",
-            "--resource-group",
-            resource_group,
-            "--lb-name",
-            lb_name,
-            "--pool-name",
-            "BackendPool",
-            "--name",
-            backend_name,
-            "--vnet",
-            vnet_name,
-            "--ip-address",
-            ip_address,
-            "--subnet",
-            subnet_name,
-        ],
-        check=True,
-    )
-
-
-def add_load_balancer_backend_address(
-    resource_group: str,
-    lb_name: str,
-    backend_name: str,
-    ip_address: str,
-    vnet_name: str,
-    subnet_name: str,
-) -> None:
-    run(
-        [
-            "az",
-            "network",
-            "lb",
-            "address-pool",
-            "address",
-            "add",
-            "--resource-group",
-            resource_group,
-            "--lb-name",
-            lb_name,
-            "--pool-name",
-            "BackendPool",
-            "--name",
-            backend_name,
-            "--vnet",
-            vnet_name,
-            "--ip-address",
-            ip_address,
-            "--subnet",
-            subnet_name,
-        ],
-        check=True,
-    )
-
-
-def get_public_ip_address(resource_group: str, public_ip_name: str) -> str:
-    result = run(
-        [
-            "az",
-            "network",
-            "public-ip",
-            "show",
-            "--resource-group",
-            resource_group,
-            "--name",
-            public_ip_name,
-            "--query",
-            "ipAddress",
-            "-o",
-            "tsv",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def load_balancer_backend_update_command(
-    resource_group: str,
-    lb_name: str,
-    backend_name: str,
-    ip_address: str,
-    vnet_name: str,
-    subnet_name: str,
-) -> list[str]:
-    return [
-        "az",
-        "network",
-        "lb",
-        "address-pool",
-        "address",
-        "update",
-        "--resource-group",
-        resource_group,
-        "--lb-name",
-        lb_name,
-        "--pool-name",
-        "BackendPool",
-        "--name",
-        backend_name,
-        "--vnet",
-        vnet_name,
-        "--ip-address",
-        ip_address,
-        "--subnet",
-        subnet_name,
-    ]
-
-
-EPILOG = textwrap.dedent(
-    """
-Example usage:
-
-Deploy a container into a new vnet (deploy1-vnet/default) with a public IP:
-deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy1 --ssh-key ~/.ssh/id_rsa.pub --create-vnet False
-
-Deploy 5 large containers into a new vnet with a NAT gateway:
-deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy2 --cpus 64 --ram 256 --num-containers 5 --vnet-subnet myvnet/mysubnet
-
-Deploy a container into an existing vnet and subnet (myvnet/mysubnet):
-deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 --vnet-subnet myvnet/mysubnet --create-vnet False
-
-Deploy a 2-node standard ACI deployment with Azure Files shares derived from a prefix:
-deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy4 --sku standard --num-containers 2 --deploy-rg --azure-file-share-prefix --azure-file-mount account=mystorage,share=rune,path=/mnt/azure,key-file=~/.azure/storage-account.key
-
-Deploy a 2-node standard ACI deployment and create a storage account automatically:
-deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy5 --sku standard --num-containers 2 --deploy-rg --azure-file-share-prefix --azure-file-mount share=rune,path=/mnt/azure
-"""
+from utils import (
+    ActionContext,
+    DeployArmAction,
+    DeploymentAction,
+    DeploymentActionKind,
+    FetchStorageAccountKeyAction,
+    LoadBalancerBackendFixupAction,
+    PrintSSHAccessAction,
+    ResourceGroupAction,
+    StorageAccountAction,
+    StorageShareAction,
+    build_parser,
+    build_per_node_azure_file_share,
+    effective_deployment_resource_group,
+    get_ssh_key,
+    load_balancer_backend_address_name,
+    load_balancer_name,
+    load_balancer_public_ip_name,
+    new_vnet_with_nat,
+    ssh_private_key_path,
+    validate_args,
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Start up a ACI deployment with sensible defaults.",
-        epilog=EPILOG,
-    )
-    parser.add_argument("--image", help="The image to use for all containers")
-    parser.add_argument(
-        "--azure-auth", help="Use az command to do authentication", action="store_true"
-    )
-    parser.add_argument(
-        "--resource-group",
-        help="The resource group for the deployment",
-        required=True,
-    )
-    parser.add_argument(
-        "--ssh-key",
-        help="The ssh key for the deployment",
-        default=None,
-    )
-    parser.add_argument(
-        "--name",
-        help="The name for the deployment",
-        default=default_container_name(),
-    )
-    parser.add_argument(
-        "--region",
-        help="The region to use for the container",
-        default="northeurope",
-    )
-    parser.add_argument(
-        "--cpus",
-        type=int,
-        help="The number of CPUs to allocate to each container",
-        default=4,
-    )
-    parser.add_argument(
-        "--ram",
-        type=int,
-        help="The amount of RAM (GB) to allocate to each container",
-        default=16,
-    )
-    parser.add_argument(
-        "--tcb-ports",
-        type=str,
-        help="Comma separated list of ports to open on each container",
-        default="22",
-    )
-    parser.add_argument(
-        "--udp-ports",
-        type=str,
-        help="Comma separated list of ports to open on each container",
-        default=None,
-    )
-    parser.add_argument(
-        "--create-vnet",
-        help="Create a new VNet for the deployment",
-        default=True,
-    )
-    parser.add_argument(
-        "--vnet-subnet",
-        type=str,
-        help=(
-            "The name of the vnet and subnet to use, in the form vnet/subnet. "
-            "If not specified, and --create-vnet is set, it will use <name>-vnet/default. "
-            "Existing VNets remain same-resource-group only, including with --deploy-rg."
-        ),
-        default=None,
-    )
-    parser.add_argument(
-        "--create-nat",
-        help="Create a NAT gateway for the VNet",
-        default=True,
-    )
-    parser.add_argument(
-        "--num-containers",
-        type=int,
-        default=1,
-        help="Number of container groups to deploy",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print the ARM template and exit. Secure parameter values are omitted.",
-    )
-    parser.add_argument(
-        "--sku",
-        choices=["confidential", "standard"],
-        default="confidential",
-        help="ACI SKU to deploy",
-    )
-    parser.add_argument(
-        "--access-mode",
-        choices=["exec", "ssh-lb"],
-        default="exec",
-        help="How to access deployed containers",
-    )
-    parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    parser.add_argument(
-        "--delete",
-        action="store_true",
-        help="Delete the deployment resources",
-    )
-    parser.add_argument(
-        "--deploy-rg",
-        action="store_true",
-        help="Deploy into a derived resource group named <resource-group>-<name>",
-    )
-    parser.add_argument(
-        "--azure-file-mount",
-        action="append",
-        default=[],
-        help=(
-            "Repeatable Azure Files mount spec using key=value pairs. "
-            "Supported keys: account, share, path, key-file. "
-            "One mount broadcasts to all nodes; multiple mounts must match --num-containers. "
-            "If account is omitted, deploy-aci creates a storage account automatically in the deployment resource group. "
-            "When account is provided, the storage account must also be in that resource group."
-        ),
-    )
-    parser.add_argument(
-        "--azure-file-share-prefix",
-        action="store_true",
-        help=(
-            "Treat share=... as a prefix and derive per-node shares like prefix-1, prefix-2. "
-            "When omitted, share=... is used as-is."
-        ),
-    )
-    return parser
-
-
-def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if not args.delete and not args.image:
-        parser.error("--image is required unless --delete is set")
-
-    if args.num_containers < 1:
-        parser.error("--num-containers must be at least 1")
-
-    if args.access_mode == "ssh-lb" and not args.delete and not args.ssh_key:
-        parser.error("--access-mode ssh-lb requires --ssh-key")
-
-    if (
-        args.access_mode == "ssh-lb"
-        and args.create_vnet is not True
-        and args.vnet_subnet is None
-    ):
-        parser.error("--access-mode ssh-lb requires VNet mode")
-
-    if not args.delete and args.create_nat is True and args.create_vnet is not True:
-        print("Error: --create-nat requires --create-vnet")
-        sys.exit(1)
-
-    parsed_mounts = []
-    for mount_index, mount_spec in enumerate(args.azure_file_mount):
-        try:
-            parsed_mount = parse_azure_file_mount_spec(mount_spec)
-        except ValueError as exc:
-            parser.error(f"--azure-file-mount #{mount_index + 1} {exc}")
-        validate_parsed_azure_file_mount(parser, parsed_mount, mount_index)
-        parsed_mounts.append(parsed_mount)
-
-    if len(parsed_mounts) > 1 and len(parsed_mounts) != args.num_containers:
-        parser.error(
-            "multiple --azure-file-mount values must match --num-containers"
-        )
-
-    if args.azure_file_share_prefix and len(parsed_mounts) == 0:
-        parser.error("--azure-file-share-prefix requires at least one --azure-file-mount")
-
-    if any(
-        mount.storage_account_name is None for mount in parsed_mounts
-    ) and any(mount.storage_account_name is not None for mount in parsed_mounts):
-        parser.error(
-            "cannot mix --azure-file-mount values with and without account=..."
-        )
-
-    if args.delete and args.deploy_rg and args.vnet_subnet is not None:
-        # Existing subnet references remain same-resource-group only.
-        pass
-
-
-def build_generated_resources(
-    args: argparse.Namespace,
-    mount_configs: list[AzureFileMountConfig | None],
-) -> tuple[list, dict[str, str | None]]:
-    resources = []
-
-    if args.create_vnet is True:
-        if args.vnet_subnet is not None:
-            vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
-        else:
-            vnet_name = f"{args.name}-vnet"
-            subnet_name = "default"
-
-        if args.create_nat is True:
-            nat_name = f"{args.name}-nat"
-            public_ip_name = f"{args.name}-ip"
-            new_res = new_vnet_with_nat(
-                vnet_name, subnet_name, nat_name, public_ip_name, args.region
-            )
-            [_, _, vnet] = new_res
-            resources.extend(new_res)
-        else:
-            vnet = tb.ResourceVNet(
-                name=vnet_name,
-                region=args.region,
-                address_space="10.0.0.0/16",
-                subnets=[
-                    tb.VNetSubnet(
-                        name=subnet_name,
-                        address_prefix="10.0.0.0/24",
-                        delegations=[
-                            {
-                                "name": "aci-delegation",
-                                "properties": {
-                                    "serviceName": "Microsoft.ContainerInstance/containerGroups"
-                                },
-                            }
-                        ],
-                    )
-                ],
-            )
-            resources.append(vnet)
-
-    elif args.vnet_subnet is not None:
-        vnet_name, subnet_name = args.vnet_subnet.split("/", 1)
-        vnet = tb.ResourceVNet(
-            name=vnet_name,
+def build_actions(args) -> list[DeploymentAction]:
+    build_context = {"resources": [], "actions": [], "load_balancer_actions": []}
+    build_context["actions"].append(
+        ResourceGroupAction(
+            resource_group=effective_deployment_resource_group(args),
             region=args.region,
-            address_space="",
-            subnets=[
-                tb.VNetSubnet(
-                    name=subnet_name, address_prefix=""
-                )
-            ],
-            existing=True,
-            emit_dependency=args.access_mode != "ssh-lb",
         )
-        if args.access_mode != "ssh-lb":
-            resources.append(vnet)
-    else:
-        vnet_name = None
-        subnet_name = None
-        vnet = None
+    )
+
+    build_context["vnet_name"] = f"{args.name}-vnet"
+    build_context["subnet_name"] = "default"
+    build_context["nat_name"] = f"{args.name}-nat"
+    build_context["nat_ip_name"] = f"{args.name}-nat-ip"
+
+    [nat_ip, nat, vnet] = new_vnet_with_nat(
+        build_context["vnet_name"],
+        build_context["subnet_name"],
+        build_context["nat_name"],
+        build_context["nat_ip_name"],
+        args.region,
+    )
+    build_context["resources"].extend([nat_ip, nat, vnet])
+    build_context["vnet"] = vnet
 
     ports = []
-    for p in (args.tcb_ports or "").split(","):
+    for p in (args.tcp_ports or "").split(","):
         p = p.strip()
         if p:
             ports.append({"protocol": "TCP", "port": int(p)})
@@ -779,18 +66,23 @@ def build_generated_resources(
 
     for cidx in range(args.num_containers):
         container_group_name = f"{args.name}-{cidx + 1}"
-        private_ip_address = None
-        if args.access_mode == "ssh-lb":
-            private_ip_address = requested_private_ip_for_index(cidx)
+        private_ip_address = f"10.0.0.{cidx + 4}"
 
-        resources.append(
-            tb.ResourceACIGroup(
+        azure_file_mount = build_per_node_azure_file_share(args, cidx, build_context)
+
+        container_resource = (
+            lambda context,
+            container_group_name=container_group_name,
+            private_ip_address=private_ip_address,
+            azure_file_mount=azure_file_mount,
+            cidx=cidx,
+            vnet=vnet: tb.ResourceACIGroup(
                 container_group_name,
                 args.region,
                 sshkey=get_ssh_key(args.ssh_key) if args.ssh_key else None,
                 containers=[
                     tb.CACI(
-                        name=f"{args.name}-0",
+                        name=f"{args.name}-{cidx}-0",
                         image=args.image,
                         cpu=args.cpus,
                         ram=args.ram,
@@ -801,688 +93,328 @@ def build_generated_resources(
                 vnet=vnet,
                 private_ip_address=private_ip_address,
                 azure_file_mount=(
-                    mount_configs[cidx].template_mount()
-                    if mount_configs[cidx] is not None
+                    azure_file_mount(context)
+                    if azure_file_mount is not None
                     else None
                 ),
-            ),
+            )
+        )
+        build_context["resources"].append(container_resource)
+
+        load_balancer_ip = tb.ResourcePublicIP(
+            name=load_balancer_public_ip_name(container_group_name),
+            region=args.region,
+            sku="Standard",
+            allocation_method="Static",
+        )
+        build_context["resources"].extend(
+            [
+                load_balancer_ip,
+                tb.ResourceLoadBalancer(
+                    name=load_balancer_name(container_group_name),
+                    region=args.region,
+                    public_ip=load_balancer_ip,
+                    vnet_name=vnet.name,
+                    subnet_name=vnet.subnets[0].name,
+                    backend_private_ip=private_ip_address,
+                    depends_on_vnet=not vnet.existing or vnet.emit_dependency,
+                ),
+            ]
         )
 
-        if args.access_mode == "ssh-lb":
-            load_balancer_ip = tb.ResourcePublicIP(
-                name=load_balancer_public_ip_name(container_group_name),
-                region=args.region,
-                sku="Standard",
-                allocation_method="Static",
+        build_context["load_balancer_actions"].append(
+            LoadBalancerBackendFixupAction(
+                resource_group=effective_deployment_resource_group(args),
+                container_group_name=container_group_name,
+                load_balancer_name=load_balancer_name(container_group_name),
+                requested_private_ip=private_ip_address,
+                vnet_name=vnet.name,
+                subnet_name=vnet.subnets[0].name,
             )
-            resources.extend(
-                [
-                    load_balancer_ip,
-                    tb.ResourceLoadBalancer(
-                        name=load_balancer_name(container_group_name),
-                        region=args.region,
-                        public_ip=load_balancer_ip,
-                        vnet_name=vnet.name,
-                        subnet_name=vnet.subnets[0].name,
-                        backend_private_ip=private_ip_address,
-                        depends_on_vnet=not vnet.existing or vnet.emit_dependency,
-                    ),
-                ]
+        )
+
+    post_deploy_actions = build_context.get("load_balancer_actions", [])
+
+    if args.ssh_key:
+        post_deploy_actions.append(
+            PrintSSHAccessAction(
+                resource_group=effective_deployment_resource_group(args),
+                ssh_key_path=ssh_private_key_path(args.ssh_key),
+                public_ip_names=[
+                    load_balancer_public_ip_name(f"{args.name}-{cidx + 1}")
+                    for cidx in range(args.num_containers)
+                ],
             )
+        )
 
-    return resources, {
-        "vnet_name": vnet_name,
-        "subnet_name": subnet_name,
-    }
-
-
-DELETE_PHASE_LABELS = [
-    "containerGroups",
-    "natGateways",
-    "natPublicIps",
-    "loadBalancers",
-    "loadBalancerPublicIps",
-    "virtualNetworks",
-]
+    return build_context["actions"] + [
+        DeployArmAction(
+            resource_group=effective_deployment_resource_group(args),
+            template=lambda context: tb.ARMTemplate(
+                [r(context) if callable(r) else r for r in build_context["resources"]]
+            ),
+        )
+    ] + post_deploy_actions
 
 
-def build_delete_phase_membership(resources: list) -> dict[str, set[str]]:
-    membership = {
-        "natPublicIps": set(),
-        "loadBalancerPublicIps": set(),
-        "existingVirtualNetworks": set(),
-    }
-
-    for resource in resources:
-        if isinstance(resource, tb.ResourceNAT):
-            membership["natPublicIps"].add(resource.public_ip.name)
-        elif isinstance(resource, tb.ResourceLoadBalancer):
-            membership["loadBalancerPublicIps"].add(resource.public_ip.name)
-        elif isinstance(resource, tb.ResourceVNet) and resource.existing:
-            membership["existingVirtualNetworks"].add(resource.name)
-
-    return membership
-
-
-def build_delete_plan(resources: list) -> list[dict[str, list[dict[str, str]] | str]]:
-    phases: dict[str, list[dict[str, str]]] = {label: [] for label in DELETE_PHASE_LABELS}
-    membership = build_delete_phase_membership(resources)
-
-    for resource in resources:
-        item = resource.to_dict()
-        resource_type = item["type"]
-        name = item["name"]
-
-        if resource_type == "Microsoft.ContainerInstance/containerGroups":
-            phases["containerGroups"].append({"type": resource_type, "name": name})
-        elif resource_type == "Microsoft.Network/natGateways":
-            phases["natGateways"].append({"type": resource_type, "name": name})
-        elif resource_type == "Microsoft.Network/loadBalancers":
-            phases["loadBalancers"].append({"type": resource_type, "name": name})
-        elif resource_type == "Microsoft.Network/publicIPAddresses":
-            if name in membership["loadBalancerPublicIps"]:
-                phases["loadBalancerPublicIps"].append({"type": resource_type, "name": name})
-            elif name in membership["natPublicIps"]:
-                phases["natPublicIps"].append({"type": resource_type, "name": name})
-        elif resource_type == "Microsoft.Network/virtualNetworks":
-            if name not in membership["existingVirtualNetworks"]:
-                phases["virtualNetworks"].append({"type": resource_type, "name": name})
-
-    return [{"label": label, "resources": phases[label]} for label in DELETE_PHASE_LABELS]
-
-
-class ResourceAlreadyMissing(Exception):
-    pass
-
-
-def azure_delete_command(resource_group: str, resource_type: str, name: str) -> list[str]:
-    return [
-        "az",
-        "resource",
-        "delete",
-        "--resource-group",
-        resource_group,
-        "--resource-type",
-        resource_type,
-        "--name",
-        name,
-    ]
-
-
-def is_missing_resource_delete_error(
-    stderr: str, resource_group: str, resource_type: str, name: str
-) -> bool:
-    stderr_lower = stderr.lower()
-    if "resourcegroupnotfound" in stderr_lower or "subscriptionnotfound" in stderr_lower:
-        return False
-
-    resource_name = f"{resource_type}/{name}".lower()
-    if "resourcenotfound" in stderr_lower and resource_name in stderr_lower:
-        return True
-
-    if (
-        resource_name in stderr_lower
-        and f"resource group '{resource_group.lower()}'" in stderr_lower
-        and "was not found" in stderr_lower
-    ):
-        return True
-
-    return False
-
-
-def delete_azure_resource(resource_group: str, resource_type: str, name: str) -> None:
-    command = azure_delete_command(resource_group, resource_type, name)
-    print(shlex.join(command))
-    result = run(command, check=False, capture_output=True, text=True)
-    stderr = result.stderr or ""
-    if result.returncode == 0:
-        return
-    if is_missing_resource_delete_error(stderr, resource_group, resource_type, name):
-        raise ResourceAlreadyMissing(name)
-    raise CalledProcessError(
-        result.returncode,
-        command,
-        output=result.stdout,
-        stderr=result.stderr,
-    )
-
-
-def execute_delete_plan(
-    resource_group: str, phases: list[dict[str, list[dict[str, str]] | str]]
-) -> list[str]:
-    failures = []
-    for phase in phases:
-        for resource in phase["resources"]:
-            try:
-                delete_azure_resource(resource_group, resource["type"], resource["name"])
-            except ResourceAlreadyMissing:
-                print(f"Skipping missing resource: {resource['name']}")
-            except CalledProcessError as exc:
-                failures.append(resource["name"])
-                print(f"Delete failed for {resource['name']}: {exc}")
-                print(f"stdout: {exc.output}")
-                print(f"stderr: {exc.stderr}")
-    return failures
-
-
-def azure_file_share_delete_command(resource_group: str, account_name: str, share_name: str) -> list[str]:
-    return [
-        "az",
-        "storage",
-        "share-rm",
-        "delete",
-        "--storage-account",
-        account_name,
-        "--name",
-        share_name,
-        "--resource-group",
-        resource_group,
-        "--only-show-errors",
-    ]
-
-
-def delete_azure_file_share(resource_group: str, account_name: str, share_name: str) -> None:
-    command = azure_file_share_delete_command(resource_group, account_name, share_name)
-    print(shlex.join(command))
-    result = run(command, check=False, capture_output=True, text=True)
-    stderr = result.stderr or ""
-    if result.returncode == 0:
-        return
-    if "could not be found" in stderr.lower() or "does not exist" in stderr.lower():
-        raise ResourceAlreadyMissing(share_name)
-    raise CalledProcessError(
-        result.returncode,
-        command,
-        output=result.stdout,
-        stderr=result.stderr,
-    )
-
-
-def execute_share_delete_plan(
-    resource_group: str,
-    mounts: list[PlannedAzureFileMount],
-) -> list[str]:
-    failures = []
-    seen: set[tuple[str, str]] = set()
-    for mount in mounts:
-        if not mount.delete_share_on_delete:
-            continue
-        share_id = (mount.storage_account_name, mount.share_name)
-        if share_id in seen:
-            continue
-        seen.add(share_id)
-        try:
-            delete_azure_file_share(resource_group, mount.storage_account_name, mount.share_name)
-        except ResourceAlreadyMissing:
-            print(f"Skipping missing share: {mount.share_name}")
-        except CalledProcessError as exc:
-            failures.append(mount.share_name)
-            print(f"Delete failed for share {mount.share_name}: {exc}")
-            print(f"stdout: {exc.output}")
-            print(f"stderr: {exc.stderr}")
-    return failures
-
-
-def render_delete_command(args: argparse.Namespace) -> list[str]:
-    command = [
-        "deploy-aci",
-        "--resource-group",
-        args.resource_group,
-        "--name",
-        args.name,
-    ]
-
-    if args.num_containers != 1:
-        command.extend(["--num-containers", str(args.num_containers)])
-    if args.create_vnet is not True:
-        command.extend(["--create-vnet", "False"])
-    elif args.create_nat is not True:
-        command.extend(["--create-nat", "False"])
-    if args.vnet_subnet is not None:
-        command.extend(["--vnet-subnet", args.vnet_subnet])
-    if args.access_mode != "exec":
-        command.extend(["--access-mode", args.access_mode])
-    if args.deploy_rg:
-        command.append("--deploy-rg")
-    if args.azure_file_share_prefix:
-        command.append("--azure-file-share-prefix")
-    for mount_spec in args.azure_file_mount:
-        command.extend(["--azure-file-mount", mount_spec])
-
-    command.append("--delete")
-    return command
-
-
-def print_resource_topology_message(
-    args: argparse.Namespace, context: dict[str, str | None]
-) -> None:
-    if args.create_vnet is True:
-        if args.create_nat is True:
-            print(
-                f"Creating new VNet: {context['vnet_name']}/{context['subnet_name']} with NAT {args.name}-nat"
-            )
-        else:
-            print(f"Creating new VNet: {context['vnet_name']}/{context['subnet_name']}")
-    elif args.vnet_subnet is not None:
-        print(f"Using existing VNet/Subnet: {args.vnet_subnet}")
-    else:
-        print("No VNet specified, deploying with public IP")
-
-
-def print_post_deploy_access(
-    resource_group: str,
-    deployment_name: str,
-    num_containers: int,
-    access_mode: str,
-    ssh_key_path: str | None,
-    vnet_name: str | None,
-    subnet_name: str | None,
-    delete_command: list[str] | None = None,
-) -> None:
-    print("Deployed")
-    for cidx in range(num_containers):
-        container_group_name = f"{deployment_name}-{cidx + 1}"
-
-        if access_mode == "exec":
-            print(f"Connect to container {cidx + 1} using:")
-            print(
-                f"az container exec --resource-group {resource_group} --name {container_group_name} --exec-command /bin/bash"
-            )
-            print("")
-            continue
-
-        requested_ip = requested_private_ip_for_index(cidx)
-        lb_name = load_balancer_name(container_group_name)
-        try:
-            actual_ip = get_container_group_private_ip(resource_group, container_group_name)
-        except CalledProcessError:
-            actual_ip = None
-            print(
-                f"Warning: unable to determine actual private IP for {container_group_name}. Skipping load balancer backend update."
-            )
-
-        if actual_ip == "":
-            actual_ip = None
-            print(
-                f"Warning: {container_group_name} did not report a private IP. Skipping load balancer backend update."
-            )
-
-        backend_name = load_balancer_backend_address_name(lb_name)
-
-        if actual_ip is not None:
-            if actual_ip != requested_ip:
-                print(
-                    f"Warning: {container_group_name} requested private IP {requested_ip} but Azure assigned {actual_ip}. Registering actual IP in load balancer backend address."
-                )
-
-            add_load_balancer_backend_address(
-                resource_group,
-                lb_name,
-                backend_name,
-                actual_ip,
-                vnet_name,
-                subnet_name,
-            )
-        else:
-            print(
-                f"Warning: backend address registration skipped for {container_group_name} because no private IP was available."
-            )
-
-        print(f"Connect to container {cidx + 1} using:")
-        public_ip_name = load_balancer_public_ip_name(container_group_name)
-        ssh_command = f"ssh -i {ssh_key_path} root@<public-ip> -p 22"
-        try:
-            public_ip = get_public_ip_address(resource_group, public_ip_name)
-            print(f"ssh -i {ssh_key_path} root@{public_ip} -p 22")
-        except CalledProcessError:
-            print(
-                f"Resolve public IP resource {public_ip_name} manually, then run: {ssh_command}"
-            )
-        print("")
-
-    if delete_command is not None:
-        print("Cleanup command:")
-        print(shlex.join(delete_command))
-
-
-def ensure_resource_group(context: DeploymentContext) -> None:
-    run(
-        [
+def execute_one(action: DeploymentAction, context: ActionContext):
+    if action.kind == DeploymentActionKind.RESOURCE_GROUP:
+        assert isinstance(action, ResourceGroupAction)
+        cmd = [
             "az",
             "group",
             "create",
             "--name",
-            context.deployment_resource_group,
+            action.resource_group,
             "--location",
-            context.region,
+            action.region,
             "--only-show-errors",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def create_storage_account(resource_group: str, storage_account_name: str, region: str) -> None:
-    run(
-        [
+        ]
+        print(f"Running: {shlex.join(cmd)}")
+        if context.dry_run:
+            return
+        run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    elif action.kind == DeploymentActionKind.STORAGE_ACCOUNT:
+        assert isinstance(action, StorageAccountAction)
+        cmd = [
             "az",
             "storage",
             "account",
             "create",
             "--resource-group",
-            resource_group,
+            action.resource_group,
             "--name",
-            storage_account_name,
+            action.account_name,
             "--location",
-            region,
+            action.region,
             "--sku",
             "Standard_LRS",
             "--kind",
             "StorageV2",
             "--only-show-errors",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def get_storage_account_region(resource_group: str, storage_account_name: str) -> str:
-    result = run(
-        [
+        ]
+        print(f"Running: {shlex.join(cmd)}")
+        if context.dry_run:
+            return
+        run(cmd, check=True, capture_output=True, text=True)
+    elif action.kind == DeploymentActionKind.STORAGE_SHARE:
+        assert isinstance(action, StorageShareAction)
+        cmd = [
             "az",
             "storage",
-            "account",
-            "show",
+            "share-rm",
+            "create",
             "--resource-group",
-            resource_group,
+            action.resource_group,
+            "--storage-account",
+            action.account_name,
             "--name",
-            storage_account_name,
-            "--query",
-            "primaryLocation",
-            "-o",
-            "tsv",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def get_storage_account_key(resource_group: str, storage_account_name: str) -> str:
-    result = run(
-        [
+            action.share_name,
+            "--only-show-errors",
+        ]
+        print(f"Running: {shlex.join(cmd)}")
+        if context.dry_run:
+            return
+        run(cmd, check=True, capture_output=True, text=True)
+    elif action.kind == DeploymentActionKind.FETCH_STORAGE_ACCOUNT_KEY:
+        assert isinstance(action, FetchStorageAccountKeyAction)
+        cmd = [
             "az",
             "storage",
             "account",
             "keys",
             "list",
             "--resource-group",
-            resource_group,
+            action.resource_group,
             "--account-name",
-            storage_account_name,
+            action.account_name,
             "--query",
             "[0].value",
             "-o",
             "tsv",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def create_azure_file_share(resource_group: str, account_name: str, share_name: str) -> None:
-    run(
-        [
+        ]
+        print(f"Running: {shlex.join(cmd)}")
+        if context.dry_run:
+            return
+        result = run(cmd, check=True, capture_output=True, text=True)
+        context.storage_key = result.stdout.strip()
+    elif action.kind == DeploymentActionKind.DEPLOY_ARM:
+        assert isinstance(action, DeployArmAction)
+        template = (
+            action.template(context) if callable(action.template) else action.template
+        )
+        with tempfile.NamedTemporaryFile() as tempf:
+            dep_json = template.to_json()
+            tempf.write(dep_json.encode("utf-8"))
+            tempf.flush()
+            az_cmd = [
+                "az",
+                "deployment",
+                "group",
+                "create",
+                "--resource-group",
+                action.resource_group,
+                "--template-file",
+                tempf.name,
+            ] + (["--verbose", "--debug"] if context.verbose else [])
+            print(f"Running: {shlex.join(az_cmd)}")
+            if context.dry_run:
+                if context.verbose:
+                    print(f"Would deploy ARM template:\n{dep_json}")
+                return
+            run(az_cmd, check=True)
+    elif action.kind == DeploymentActionKind.LOAD_BALANCER_BACKEND_FIXUP:
+        assert isinstance(action, LoadBalancerBackendFixupAction)
+        show_cmd = [
             "az",
-            "storage",
-            "share-rm",
-            "create",
+            "container",
+            "show",
             "--resource-group",
-            resource_group,
-            "--storage-account",
-            account_name,
+            action.resource_group,
             "--name",
-            share_name,
-            "--only-show-errors",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def prepare_azure_file_mount_configs(
-    plan: AzureFilePlan | None,
-    context: DeploymentContext,
-) -> list[AzureFileMountConfig | None]:
-    if plan is None:
-        return []
-
-    storage_account_name = plan.mounts[0].storage_account_name
-    if plan.storage_mode == AzureFileStorageMode.MANAGED:
-        create_storage_account(
-            context.deployment_resource_group,
-            storage_account_name,
-            context.region,
-        )
-    else:
-        checked_accounts = {
-            mount.storage_account_name for mount in plan.mounts
-        }
-        for existing_account_name in checked_accounts:
-            storage_region = get_storage_account_region(
-                context.deployment_resource_group,
-                existing_account_name,
+            action.container_group_name,
+            "--query",
+            "ipAddress.ip",
+            "-o",
+            "tsv",
+        ]
+        print(f"Running: {shlex.join(show_cmd)}")
+        if context.dry_run:
+            return
+        result = run(show_cmd, check=True, capture_output=True, text=True)
+        actual_ip = result.stdout.strip()
+        if actual_ip == "":
+            print(
+                f"Warning: {action.container_group_name} did not report a private IP. "
+                "Skipping load balancer backend update."
             )
-            if normalize_region_name(storage_region) != normalize_region_name(context.region):
-                raise ValueError(
-                    "existing Azure Files storage account must be in the deployment region"
-                )
-
-    created_shares: set[tuple[str, str]] = set()
-    for mount in plan.mounts:
-        share_id = (mount.storage_account_name, mount.share_name)
-        if share_id in created_shares:
-            continue
-        created_shares.add(share_id)
-        create_azure_file_share(
-            context.deployment_resource_group,
-            mount.storage_account_name,
-            mount.share_name,
-        )
-
-    storage_key = (
-        get_storage_account_key(context.deployment_resource_group, storage_account_name)
-        if plan.storage_mode == AzureFileStorageMode.MANAGED
-        else None
-    )
-
-    mount_configs = []
-    for mount in plan.mounts:
-        if plan.storage_mode == AzureFileStorageMode.EXISTING:
-            if mount.key_file is not None:
-                resolved_storage_key = get_secret_file_contents(mount.key_file)
-            else:
-                resolved_storage_key = get_storage_account_key(
-                    context.deployment_resource_group,
-                    mount.storage_account_name,
-                )
-        else:
-            resolved_storage_key = storage_key
-
-        mount_configs.append(
-            AzureFileMountConfig(
-                storage_account_name=mount.storage_account_name,
-                share_name=mount.share_name,
-                mount_path=mount.mount_path,
-                storage_account_key_parameter=azure_file_storage_key_parameter_name(
-                    mount.node_index
-                ),
-                storage_account_key=resolved_storage_key,
-                volume_name=f"azurefiles{mount.node_index + 1}",
+            return
+        if actual_ip != action.requested_private_ip:
+            print(
+                f"Warning: {action.container_group_name} requested private IP "
+                f"{action.requested_private_ip} but Azure assigned {actual_ip}. "
+                "Registering actual IP in load balancer backend address."
             )
-        )
-
-    return mount_configs
-
-
-def print_dry_run_actions(
-    context: DeploymentContext,
-    plan: AzureFilePlan | None,
-) -> None:
-    print("Planned out-of-template actions:")
-    if context.deployment_resource_group != context.base_resource_group:
-        print(
-            f"- ensure resource group {context.deployment_resource_group} in {context.region}"
-        )
+        update_cmd = [
+            "az",
+            "network",
+            "lb",
+            "address-pool",
+            "address",
+            "update",
+            "--resource-group",
+            action.resource_group,
+            "--lb-name",
+            action.load_balancer_name,
+            "--pool-name",
+            "BackendPool",
+            "--name",
+            load_balancer_backend_address_name(action.load_balancer_name),
+            "--vnet",
+            action.vnet_name,
+            "--ip-address",
+            actual_ip,
+            "--subnet",
+            action.subnet_name,
+        ]
+        print(f"Running: {shlex.join(update_cmd)}")
+        run(update_cmd, check=True)
+    elif action.kind == DeploymentActionKind.PRINT_SSH_ACCESS:
+        assert isinstance(action, PrintSSHAccessAction)
+        for public_ip_name in action.public_ip_names:
+            show_cmd = [
+                "az",
+                "network",
+                "public-ip",
+                "show",
+                "--resource-group",
+                action.resource_group,
+                "--name",
+                public_ip_name,
+                "--query",
+                "ipAddress",
+                "-o",
+                "tsv",
+            ]
+            if context.dry_run:
+                print(shlex.join(show_cmd))
+                continue
+            result = run(show_cmd, check=True, capture_output=True, text=True)
+            public_ip = result.stdout.strip()
+            print(f"ssh -i {action.ssh_key_path} root@{public_ip} -p 22")
     else:
-        print(f"- use resource group {context.deployment_resource_group}")
-    if plan is None:
-        print("- no Azure Files provisioning")
-        return
-    if plan.storage_mode == AzureFileStorageMode.MANAGED:
-        print(
-            f"- create storage account {plan.managed_storage_account_name} in {context.deployment_resource_group} ({context.region})"
+        raise ValueError(f"unsupported action kind {action.kind}")
+
+
+class DeletionPlan:
+    def __init__(self):
+        self.resource_group: str | None = None
+
+    def execute(self, context: ActionContext):
+        if self.resource_group is not None:
+            cmd = [
+                "az",
+                "group",
+                "delete",
+                "--name",
+                self.resource_group,
+                "--yes",
+                "--no-wait",
+            ]
+            print(f"Running: {shlex.join(cmd)}")
+            if context.dry_run:
+                return
+            run(cmd, check=True)
+            return
+
+        raise ValueError(
+            "delete is only supported for deploy-aci-managed resource groups; "
+            "delete resources manually when --use-existing-resource-group is set"
         )
-    else:
-        print(
-            f"- use existing storage account {plan.mounts[0].storage_account_name} in {context.deployment_resource_group} ({context.region})"
-        )
-    seen = set()
-    for mount in plan.mounts:
-        if mount.share_name in seen:
-            continue
-        seen.add(mount.share_name)
-        print(
-            f"- create Azure Files share {mount.share_name} in storage account {mount.storage_account_name}"
-        )
 
-def build_resources(args):
-    pass
 
-def deploy(resources):
-    pass
 
-def delete(resources):
-    pass
+def plan_delete_one(action: DeploymentAction, context: ActionContext, deletion_plan):
+    if action.kind == DeploymentActionKind.RESOURCE_GROUP:
+        assert isinstance(action, ResourceGroupAction)
+        if not context.use_existing_resource_group:
+            deletion_plan.resource_group = action.resource_group
+    elif action.kind == DeploymentActionKind.STORAGE_ACCOUNT:
+        assert isinstance(action, StorageAccountAction)
+    elif action.kind == DeploymentActionKind.STORAGE_SHARE:
+        assert isinstance(action, StorageShareAction)
+    elif action.kind == DeploymentActionKind.FETCH_STORAGE_ACCOUNT_KEY:
+        assert isinstance(action, FetchStorageAccountKeyAction)
+        pass
+    elif action.kind == DeploymentActionKind.DEPLOY_ARM:
+        assert isinstance(action, DeployArmAction)
+        # TODO parse the template to figure out what to delete
+        pass
 
-def main() -> None:
+
+if __name__ == "__main__":
     parser = build_parser()
     args = parser.parse_args()
     validate_args(parser, args)
 
-    context = build_deployment_context(args)
-    try:
-        azure_file_plan = build_azure_file_plan(args, context)
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    mount_configs_for_resources = (
-        [
-            AzureFileMountConfig(
-                storage_account_name=mount.storage_account_name,
-                share_name=mount.share_name,
-                mount_path=mount.mount_path,
-                storage_account_key_parameter=azure_file_storage_key_parameter_name(
-                    mount.node_index
-                ),
-                volume_name=f"azurefiles{mount.node_index + 1}",
-            )
-            for mount in azure_file_plan.mounts
-        ]
-        if azure_file_plan is not None
-        else [None for _ in range(args.num_containers)]
+    actions = build_actions(args)
+    context = ActionContext(
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        storage_key=None,
+        use_existing_resource_group=args.use_existing_resource_group,
     )
 
-    resources, resource_context = build_generated_resources(args, mount_configs_for_resources)
-
-    if args.delete:
-        failures = execute_delete_plan(
-            context.deployment_resource_group,
-            build_delete_plan(resources),
-        )
-        if azure_file_plan is not None:
-            failures.extend(
-                execute_share_delete_plan(
-                    context.deployment_resource_group,
-                    azure_file_plan.mounts,
-                )
-            )
-        sys.exit(1 if failures else 0)
-
-    print_resource_topology_message(args, resource_context)
-
-    deployment = tb.ARMTemplate(
-        resources,
-        parameters=arm_parameters_for_mounts(mount_configs_for_resources),
-    )
-
-    with tempfile.NamedTemporaryFile() as tempf, tempfile.NamedTemporaryFile() as paramsf:
-        dep_json = deployment.to_json()
-        if args.dry_run is True:
-            print(dep_json)
-            print_dry_run_actions(context, azure_file_plan)
-            exit(0)
-        tempf.write(dep_json.encode("utf-8"))
-        tempf.flush()
-        ensure_resource_group(context)
-        realized_mount_configs = prepare_azure_file_mount_configs(azure_file_plan, context)
-        parameter_values = arm_parameter_values_for_mounts(realized_mount_configs)
-        if parameter_values:
-            write_parameters_file(paramsf, parameter_values)
-
-        az_cmd = [
-            "az",
-            "deployment",
-            "group",
-            "create",
-            "--resource-group",
-            context.deployment_resource_group,
-            "--template-file",
-            tempf.name,
-        ] + (
-            ["--parameters", f"@{paramsf.name}"] if parameter_values else []
-        ) + (["--verbose", "--debug"] if args.verbose else [])
-        print("Running:")
-        print(shlex.join(az_cmd))
-        run(az_cmd, check=True)
-
-    delete_command = render_delete_command(args)
-
-    if args.create_vnet is True or args.vnet_subnet is not None:
-        print_post_deploy_access(
-            resource_group=context.deployment_resource_group,
-            deployment_name=args.name,
-            num_containers=args.num_containers,
-            access_mode=args.access_mode,
-            ssh_key_path=args.ssh_key,
-            vnet_name=resource_context["vnet_name"],
-            subnet_name=resource_context["subnet_name"],
-            delete_command=delete_command,
-        )
+    if not args.delete:
+        for action in actions:
+            execute_one(action, context)
     else:
-        for cidx in range(args.num_containers):
-            run(
-                [
-                    "az",
-                    "container",
-                    "show",
-                    "--resource-group",
-                    context.deployment_resource_group,
-                    "--name",
-                    f"{args.name}-{cidx + 1}",
-                    "--query",
-                    "ipAddress.ip",
-                ]
-            )
-        print("Cleanup command:")
-        print(shlex.join(delete_command))
-
-
-if __name__ == "__main__":
-    main()
+        deletion_plan = DeletionPlan()
+        for action in actions:
+            plan_delete_one(action, context, deletion_plan)
+        deletion_plan.execute(context)

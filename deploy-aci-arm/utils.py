@@ -49,11 +49,18 @@ class ResourceGroupAction(DeploymentAction):
 
 
 class StorageAccountAction(DeploymentAction):
-    def __init__(self, resource_group: str, account_name: str, region: str):
+    def __init__(
+        self,
+        resource_group: str,
+        account_name: str,
+        region: str,
+        sku: str,
+    ):
         super().__init__(DeploymentActionKind.STORAGE_ACCOUNT)
         self.resource_group = resource_group
         self.account_name = account_name
         self.region = region
+        self.sku = sku
 
 
 class StorageShareAction(DeploymentAction):
@@ -179,6 +186,12 @@ def derived_storage_account_name(args: argparse.Namespace) -> str:
     return (name or f"aci{digest}")[:24]
 
 
+def storage_account_kind_for_azure_file_sku(sku: str) -> str:
+    if sku.startswith("Premium"):
+        return "FileStorage"
+    return "StorageV2"
+
+
 def build_per_node_azure_file_share(
     args: argparse.Namespace,
     cidx: int,
@@ -202,6 +215,7 @@ def build_per_node_azure_file_share(
                 resource_group=effective_deployment_resource_group(args),
                 account_name=storage_account_name,
                 region=args.region,
+                sku=args.azure_file_account_sku,
             )
         )
         build_context["storage_account_name"] = storage_account_name
@@ -333,6 +347,9 @@ deploy-aci --image ghcr.io/myrepo/myimage --resource-group my-rg --name deploy3 
 Deploy a 2-node cluster into a managed derived resource group with one shared storage account and per-node Azure Files shares:
 deploy-aci --image ghcr.io/myrepo/myimage --resource-group-prefix my-rg --name cluster2 --ssh-key ~/.ssh/id_rsa.pub --sku standard --num-containers 2 --azure-file-share-prefix --azure-file-mount share=workspace,path=/mnt/workspace
 
+Use premium Azure Files backing storage for the deployment-created storage account:
+deploy-aci --image ghcr.io/myrepo/myimage --resource-group-prefix my-rg --name cluster2 --ssh-key ~/.ssh/id_rsa.pub --sku standard --azure-file-account-sku Premium_LRS --azure-file-mount share=workspace,path=/mnt/workspace
+
 Deploy into an exact named resource group and let deploy-aci create/delete it:
 deploy-aci --image ghcr.io/myrepo/myimage --resource-group cluster2-rg --name cluster2 --ssh-key ~/.ssh/id_rsa.pub --sku standard --num-containers 2
 
@@ -450,6 +467,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Treat share=... as a prefix and derive per-node shares like prefix-1, prefix-2. "
             "When omitted, share=... is used as-is."
+        ),
+    )
+    parser.add_argument(
+        "--azure-file-account-sku",
+        default="Standard_LRS",
+        help=(
+            "Raw Azure storage account SKU for the deploy-aci-created Azure Files account. "
+            "Common values: Standard_LRS (default) and Premium_LRS."
         ),
     )
     parser.add_argument(

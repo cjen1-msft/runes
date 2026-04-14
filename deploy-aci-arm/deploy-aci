@@ -27,6 +27,7 @@ from utils import (
     load_balancer_public_ip_name,
     new_vnet_with_nat,
     ssh_private_key_path,
+    storage_account_kind_for_azure_file_sku,
     validate_args,
 )
 
@@ -206,9 +207,9 @@ def execute_one(action: DeploymentAction, context: ActionContext):
             "--location",
             action.region,
             "--sku",
-            "Standard_LRS",
+            action.sku,
             "--kind",
-            "StorageV2",
+            storage_account_kind_for_azure_file_sku(action.sku),
             "--only-show-errors",
         ]
         print(f"Running: {shlex.join(cmd)}")

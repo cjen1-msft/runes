@@ -26,6 +26,7 @@ class DeploymentActionKind(Enum):
     FETCH_STORAGE_ACCOUNT_KEY = "fetch_storage_account_key"
     LOAD_BALANCER_BACKEND_FIXUP = "load_balancer_backend_fixup"
     PRINT_SSH_ACCESS = "print_ssh_access"
+    PRINT_IP_MAPPING = "print_ip_mapping"
 
 
 class DeploymentAction:
@@ -99,6 +100,19 @@ class PrintSSHAccessAction(DeploymentAction):
         super().__init__(DeploymentActionKind.PRINT_SSH_ACCESS)
         self.resource_group = resource_group
         self.ssh_key_path = ssh_key_path
+        self.public_ip_names = public_ip_names
+
+
+class PrintIPMappingAction(DeploymentAction):
+    def __init__(
+        self,
+        resource_group: str,
+        container_group_names: list[str],
+        public_ip_names: list[str],
+    ):
+        super().__init__(DeploymentActionKind.PRINT_IP_MAPPING)
+        self.resource_group = resource_group
+        self.container_group_names = container_group_names
         self.public_ip_names = public_ip_names
 
 

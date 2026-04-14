@@ -126,7 +126,6 @@ class ResourceLoadBalancer:
     public_ip: ResourcePublicIP
     vnet_name: str
     subnet_name: str
-    backend_private_ip: str
     depends_on_vnet: bool = True
 
     def to_dict(self):
@@ -158,21 +157,7 @@ class ResourceLoadBalancer:
                 "backendAddressPools": [
                     {
                         "name": backend_pool_name,
-                        "properties": {
-                            "loadBalancerBackendAddresses": [
-                                {
-                                    "name": f"{self.name}-backend-address",
-                                    "properties": {
-                                        "ipAddress": self.backend_private_ip,
-                                        "subnet": {
-                                            "id": subnet_resource_id(
-                                                self.vnet_name, self.subnet_name
-                                            )
-                                        },
-                                    },
-                                }
-                            ]
-                        },
+                        "properties": {},
                     }
                 ],
                 "probes": [

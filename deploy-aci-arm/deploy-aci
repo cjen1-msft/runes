@@ -13,6 +13,7 @@ from utils import (
     DeploymentActionKind,
     FetchStorageAccountKeyAction,
     LoadBalancerBackendFixupAction,
+    PrintIPMappingAction,
     PrintSSHAccessAction,
     ResourceGroupAction,
     StorageAccountAction,
@@ -116,7 +117,6 @@ def build_actions(args) -> list[DeploymentAction]:
                     public_ip=load_balancer_ip,
                     vnet_name=vnet.name,
                     subnet_name=vnet.subnets[0].name,
-                    backend_private_ip=private_ip_address,
                     depends_on_vnet=not vnet.existing or vnet.emit_dependency,
                 ),
             ]
@@ -146,6 +146,19 @@ def build_actions(args) -> list[DeploymentAction]:
                 ],
             )
         )
+
+    post_deploy_actions.append(
+        PrintIPMappingAction(
+            resource_group=effective_deployment_resource_group(args),
+            container_group_names=[
+                f"{args.name}-{cidx + 1}" for cidx in range(args.num_containers)
+            ],
+            public_ip_names=[
+                load_balancer_public_ip_name(f"{args.name}-{cidx + 1}")
+                for cidx in range(args.num_containers)
+            ],
+        )
+    )
 
     return build_context["actions"] + [
         DeployArmAction(
@@ -300,13 +313,16 @@ def execute_one(action: DeploymentAction, context: ActionContext):
                 f"{action.requested_private_ip} but Azure assigned {actual_ip}. "
                 "Registering actual IP in load balancer backend address."
             )
-        update_cmd = [
+        backend_address_name = load_balancer_backend_address_name(
+            action.load_balancer_name
+        )
+        show_backend_cmd = [
             "az",
             "network",
             "lb",
             "address-pool",
             "address",
-            "update",
+            "show",
             "--resource-group",
             action.resource_group,
             "--lb-name",
@@ -314,7 +330,28 @@ def execute_one(action: DeploymentAction, context: ActionContext):
             "--pool-name",
             "BackendPool",
             "--name",
-            load_balancer_backend_address_name(action.load_balancer_name),
+            backend_address_name,
+        ]
+        if context.verbose:
+            print(f"Running: {shlex.join(show_backend_cmd)}")
+        backend_exists = (
+            run(show_backend_cmd, check=False, capture_output=True, text=True).returncode == 0
+        )
+        backend_cmd = [
+            "az",
+            "network",
+            "lb",
+            "address-pool",
+            "address",
+            "update" if backend_exists else "add",
+            "--resource-group",
+            action.resource_group,
+            "--lb-name",
+            action.load_balancer_name,
+            "--pool-name",
+            "BackendPool",
+            "--name",
+            backend_address_name,
             "--vnet",
             action.vnet_name,
             "--ip-address",
@@ -322,8 +359,8 @@ def execute_one(action: DeploymentAction, context: ActionContext):
             "--subnet",
             action.subnet_name,
         ]
-        print(f"Running: {shlex.join(update_cmd)}")
-        run(update_cmd, check=True)
+        print(f"Running: {shlex.join(backend_cmd)}")
+        run(backend_cmd, check=True)
     elif action.kind == DeploymentActionKind.PRINT_SSH_ACCESS:
         assert isinstance(action, PrintSSHAccessAction)
         for public_ip_name in action.public_ip_names:
@@ -347,6 +384,52 @@ def execute_one(action: DeploymentAction, context: ActionContext):
             result = run(show_cmd, check=True, capture_output=True, text=True)
             public_ip = result.stdout.strip()
             print(f"ssh -i {action.ssh_key_path} root@{public_ip} -p 22")
+    elif action.kind == DeploymentActionKind.PRINT_IP_MAPPING:
+        assert isinstance(action, PrintIPMappingAction)
+        print("Public/private IP mappings:")
+        for container_group_name, public_ip_name in zip(
+            action.container_group_names, action.public_ip_names, strict=True
+        ):
+            private_ip_cmd = [
+                "az",
+                "container",
+                "show",
+                "--resource-group",
+                action.resource_group,
+                "--name",
+                container_group_name,
+                "--query",
+                "ipAddress.ip",
+                "-o",
+                "tsv",
+            ]
+            public_ip_cmd = [
+                "az",
+                "network",
+                "public-ip",
+                "show",
+                "--resource-group",
+                action.resource_group,
+                "--name",
+                public_ip_name,
+                "--query",
+                "ipAddress",
+                "-o",
+                "tsv",
+            ]
+            if context.dry_run:
+                print(shlex.join(private_ip_cmd))
+                print(shlex.join(public_ip_cmd))
+                continue
+            private_ip = run(
+                private_ip_cmd, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            public_ip = run(
+                public_ip_cmd, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            print(
+                f"{container_group_name}: private={private_ip} public={public_ip}"
+            )
     else:
         raise ValueError(f"unsupported action kind {action.kind}")
 

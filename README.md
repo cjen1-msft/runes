@@ -54,4 +54,31 @@ This will:
 - Deploy it using the appropriate ARM template
 - Output the container’s public IP address
 
+### Azure Files Mount
+
+To mount an existing Azure Files share into the deployed container, provide the
+storage account, share name, absolute container mount path, and a file that
+contains the storage account key:
+
+```bash
+./deploy-aci \
+  --resource-group <resource-group-name> \
+  --image <image-name> \
+  --sku standard \
+  --azure-file-storage-account <storage-account-name> \
+  --azure-file-share <share-name> \
+  --azure-file-mount-path /mnt/azure \
+  --azure-file-account-key-file ~/.azure/storage-account.key
+```
+
+The storage account key is passed to ARM as a `secureString` parameter rather
+than being embedded in the generated template or printed in the deployment
+command.
+
+Run the focused snapshot tests with:
+
+```bash
+pytest deploy-aci-arm/tests/test_deploy_aci_snapshots.py -v
+```
+
 ---

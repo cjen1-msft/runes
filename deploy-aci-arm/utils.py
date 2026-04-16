@@ -268,6 +268,7 @@ def new_vnet_with_nat(
     nat_name: str,
     pub_ip_name: str,
     region: str,
+    ports: list[dict],
 ) -> list:
     pub_ip = tb.ResourcePublicIP(
         name=pub_ip_name,
@@ -285,6 +286,32 @@ def new_vnet_with_nat(
         address_space=address_space,
     )
 
+    nsg_name = f"{vnet_name}-nsg"
+    security_rules = []
+    priority = 100
+    for port in ports:
+        protocol = port["protocol"].upper()
+        security_rules.append(
+            tb.NSGRule(
+                name=f"allow-{protocol.lower()}-{port['port']}",
+                priority=priority,
+                direction="Inbound",
+                access="Allow",
+                protocol=protocol.capitalize(),
+                source_port_range="*",
+                destination_port_range=str(port["port"]),
+                source_address_prefix="CorpNetPublic",
+                destination_address_prefix="*",
+            )
+        )
+        priority += 10
+
+    nsg = tb.ResourceNSG(
+        name=nsg_name,
+        region=region,
+        security_rules=security_rules,
+    )
+
     vnet = tb.ResourceVNet(
         name=vnet_name,
         region=region,
@@ -294,6 +321,7 @@ def new_vnet_with_nat(
                 name=subnet_name,
                 address_prefix="10.0.0.0/24",
                 nat_gateway=nat_gateway,
+                nsg=nsg,
                 delegations=[
                     {
                         "name": "aci-delegation",
@@ -306,7 +334,7 @@ def new_vnet_with_nat(
         ],
     )
 
-    return [pub_ip, nat_gateway, vnet]
+    return [pub_ip, nat_gateway, nsg, vnet]
 
 
 def load_balancer_name(container_group_name: str) -> str:

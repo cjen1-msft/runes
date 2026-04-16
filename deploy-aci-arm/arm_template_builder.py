@@ -227,6 +227,7 @@ class VNetSubnet:
     address_prefix: str
     delegations: list[tuple[str, str]] | None = None
     nat_gateway: ResourceNAT | None = None
+    nsg: ResourceNSG | None = None
     allow_outbound: bool = False
 
     def to_dict(self):
@@ -238,13 +239,18 @@ class VNetSubnet:
             }
         else:
             nat_gateway_ = {}
+        if self.nsg:
+            nsg_ = {"networkSecurityGroup": {"id": self.nsg.get_name()}}
+        else:
+            nsg_ = {}
         d = {
             "name": self.name,
             "properties": {
                 "addressPrefix": self.address_prefix,
                 "defaultoutboundaccess": self.allow_outbound,
             }
-            | nat_gateway_,
+            | nat_gateway_
+            | nsg_,
         }
         if self.delegations:
             d["properties"]["delegations"] = self.delegations
@@ -264,6 +270,8 @@ class ResourceVNet:
         subnets = self.subnets or []
         depends_on = [
             s.nat_gateway.get_name() for s in subnets if s.nat_gateway is not None
+        ] + [
+            s.nsg.get_name() for s in subnets if s.nsg is not None
         ]
         return {
             "type": VIRTUAL_NETWORK_TYPE,

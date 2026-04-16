@@ -1,84 +1,102 @@
-# ACI Container Deployer
+# Runes
 
-This `deploy-aci` script automates the deployment of a Docker container to Azure Container Instances (ACI) using the Azure CLI. It supports both public and private container images, including those from GitHub Container Registry.
+A collection of scripts and tools for working with Azure, focused on
+deploying containers to Azure Container Instances and providing tooling
+for SNP-based confidential computing.
 
-- Deploys containers to Azure using ARM templates
-- Supports public and private container images
-- Automatically handles ACR authentication for private images
-- Injects an SSH key for remote access (if needed)
-- Outputs the public IP of the container after deployment
+## deploy-aci-arm
 
----
+Deploys Docker containers to Azure Container Instances using ARM templates.
+Handles VNet/NAT/load-balancer creation, SSH access, and optional Azure Files
+mounts.
 
-## Prerequisites
-
-The following needs to be installed:
-
-- Python
-- Docker
-- Azure CLI
-
-### One-time Setup
-
-1. **Login to Azure:**
-   ```bash
-   az login
-   ```
-
-2. **Create a Resource Group (if not already created):**
-   ```bash
-   az group create --name my-resource-group --location eastus
-   ```
-
-3. **Generate an SSH key (if not already present):**
-   ```bash
-   ssh-keygen -t rsa
-   ```
-
----
-
-## Usage
+### Quick start
 
 ```bash
-./deploy-aci \
-  --resource-group <resource-group-name> \
-  --image <image-name> \
-  [--name <container-name>] 
-```
-
-Sample public test image: `ghcr.io/cjen1-msft/scitt-snp:prebaked-latest`
-
-This will:
-
-- Determine if the image is public or private
-- Deploy it using the appropriate ARM template
-- Output the container’s public IP address
-
-### Azure Files Mount
-
-To mount an existing Azure Files share into the deployed container, provide the
-storage account, share name, absolute container mount path, and a file that
-contains the storage account key:
-
-```bash
-./deploy-aci \
-  --resource-group <resource-group-name> \
-  --image <image-name> \
+./deploy-aci-arm/deploy-aci \
+  --resource-group-prefix my-rg \
+  --name mycluster \
+  --image ghcr.io/myrepo/myimage:latest \
+  --ssh-key ~/.ssh/id_rsa.pub \
   --sku standard \
-  --azure-file-storage-account <storage-account-name> \
-  --azure-file-share <share-name> \
-  --azure-file-mount-path /mnt/azure \
-  --azure-file-account-key-file ~/.azure/storage-account.key
+  --num-containers 3
 ```
 
-The storage account key is passed to ARM as a `secureString` parameter rather
-than being embedded in the generated template or printed in the deployment
-command.
+This creates a resource group `my-rg-mycluster`, deploys 3 container groups
+each with a VNet, NAT gateway, and load balancer, then prints the SSH
+commands and public/private IP mappings.
 
-Run the focused snapshot tests with:
+### Parameters
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--resource-group <name>` | — | Deploy into this exact resource group. Mutually exclusive with `--resource-group-prefix`. |
+| `--resource-group-prefix <prefix>` | — | Derive the resource group as `<prefix>-<name>`. Mutually exclusive with `--resource-group`. |
+| `--image <image>` | — | Container image. Required unless `--delete`. |
+| `--ssh-key <path>` | — | SSH public key file. Required unless `--delete`. |
+| `--name <name>` | random | Deployment name. Used in resource naming. |
+| `--region <region>` | `northeurope` | Azure region. |
+| `--sku <sku>` | `confidential` | `confidential` or `standard`. |
+| `--num-containers <n>` | `1` | Number of container groups to deploy. |
+| `--cpus <n>` | `4` | CPUs per container. |
+| `--ram <n>` | `16` | RAM (GB) per container. |
+| `--tcp-ports <ports>` | `22` | Comma-separated TCP ports to open. |
+| `--udp-ports <ports>` | — | Comma-separated UDP ports to open. |
+| `--dry-run` | — | Print planned commands without executing. |
+| `--verbose` | — | Verbose output. |
+| `--delete` | — | Delete the managed resource group for this deployment. |
+| `--use-existing-resource-group` | — | Treat the resource group as pre-existing; don't create or delete it. Requires `--resource-group`. |
+| `--azure-auth` | — | Use `az` CLI for image registry authentication. |
+
+### Azure Files mounts
+
+Use `--azure-file-mount` to attach an Azure Files share to each container.
+The flag accepts comma-separated `key=value` pairs:
+
+- `share=<name>` — required; the file share name (or prefix with `--azure-file-share-prefix`)
+- `path=<absolute-path>` — required; the mount path inside the container
+
+The tool automatically creates a storage account and the specified shares in
+the deployment resource group.
+
+With `--azure-file-share-prefix`, the `share` value is treated as a prefix
+and per-node shares are derived as `<prefix>-1`, `<prefix>-2`, etc.
+
+Use `--azure-file-account-sku` (default `Standard_LRS`) to control the
+storage account SKU (e.g. `Premium_LRS` for premium file shares).
 
 ```bash
-pytest deploy-aci-arm/tests/test_deploy_aci_snapshots.py -v
+./deploy-aci-arm/deploy-aci \
+  --resource-group-prefix my-rg \
+  --name mycluster \
+  --image ghcr.io/myrepo/myimage:latest \
+  --ssh-key ~/.ssh/id_rsa.pub \
+  --sku standard \
+  --num-containers 2 \
+  --azure-file-share-prefix \
+  --azure-file-mount share=workspace,path=/mnt/workspace
 ```
 
----
+This creates shares `workspace-1` and `workspace-2` mounted at
+`/mnt/workspace` in each container.
+
+## docker-attestation-tools
+
+A Docker image for working with SNP-based systems, optimised specifically
+for CCF. Built on Azure Linux 3.0.
+
+### Image contents
+
+- **SNP report tools** (`bin/`): `get-snp-report`, `get-fake-snp-report`,
+  `hex2report`, `verbose-report`
+- **Scripts** (`scripts/`): AMD collateral fetching, attestation stashing,
+  log processing, dev VM setup
+
+### Dev VM setup
+
+`scripts/setup-devvm.sh` bootstraps a container for CCF development — clones
+the CCF repo, configures remotes, and runs the CCF CI setup script.
+
+```bash
+/scripts/setup-devvm.sh -r github.com/microsoft/ccf -b main
+```

@@ -337,6 +337,20 @@ def new_vnet_with_nat(
     return [pub_ip, nat_gateway, nsg, vnet]
 
 
+def resource_name_prefix_from_vnet_name(vnet_name: str) -> str:
+    if vnet_name.endswith("-vnet"):
+        return vnet_name[: -len("-vnet")]
+    return vnet_name
+
+
+def nat_gateway_name_for_vnet(vnet_name: str) -> str:
+    return f"{resource_name_prefix_from_vnet_name(vnet_name)}-nat"
+
+
+def nat_public_ip_name_for_vnet(vnet_name: str) -> str:
+    return f"{resource_name_prefix_from_vnet_name(vnet_name)}-nat-ip"
+
+
 def load_balancer_name(container_group_name: str) -> str:
     return f"{container_group_name}-lb"
 

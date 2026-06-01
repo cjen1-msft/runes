@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import shlex
+import sys
+from dataclasses import dataclass
+from subprocess import CalledProcessError, CompletedProcess, run
+
+from utils import nat_gateway_name_for_vnet, nat_public_ip_name_for_vnet
+
+
+RESERVED_SUBNET_NAMES = {
+    "azurebastionsubnet",
+    "azurefirewallmanagementsubnet",
+    "azurefirewallsubnet",
+    "gatewaysubnet",
+    "routeserversubnet",
+}
+
+
+@dataclass(frozen=True)
+class SubnetState:
+    name: str
+    nat_gateway_id: str | None
+
+
+@dataclass(frozen=True)
+class VNetState:
+    resource_id: str
+    location: str
+    subnets: list[SubnetState]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Make an existing VNet use explicit outbound connectivity by "
+            "creating a NAT gateway/public IP and updating target subnets."
+        ),
+        epilog="""Example:
+  update-vnet-outbound --resource-group my-rg --vnet mycluster-vnet --subnet default
+
+By default the script targets all non-reserved subnets discovered in the VNet.
+Use --dry-run with --location and --subnet to print the planned commands without
+requiring an Azure lookup.
+""",
+    )
+    parser.add_argument("--resource-group", required=True, help="VNet resource group")
+    parser.add_argument("--vnet", required=True, help="Existing virtual network name")
+    parser.add_argument(
+        "--location",
+        help="Azure region. Defaults to the location read from the existing VNet.",
+    )
+    parser.add_argument(
+        "--subnet",
+        action="append",
+        default=[],
+        help=(
+            "Target subnet name. Repeat or comma-separate for multiple subnets. "
+            "Defaults to all non-reserved subnets in the VNet."
+        ),
+    )
+    parser.add_argument(
+        "--nat-name",
+        help="NAT gateway name. Defaults to <deployment>-nat for <deployment>-vnet.",
+    )
+    parser.add_argument(
+        "--public-ip-name",
+        help=(
+            "Outbound public IP resource name. Defaults to <deployment>-nat-ip "
+            "for <deployment>-vnet."
+        ),
+    )
+    parser.add_argument(
+        "--replace-existing-nat",
+        action="store_true",
+        help="Allow replacing a subnet's existing NAT gateway association.",
+    )
+    parser.add_argument(
+        "--include-reserved-subnets",
+        action="store_true",
+        help=(
+            "Include reserved subnets such as GatewaySubnet when --subnet is not "
+            "specified."
+        ),
+    )
+    parser.add_argument(
+        "--subscription",
+        help="Azure subscription name or ID to pass to az commands.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned Azure commands without executing mutating operations.",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    return parser
+
+
+def parse_subnet_names(values: list[str]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for raw_name in value.split(","):
+            name = raw_name.strip()
+            if name == "":
+                continue
+            normalized = name.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                names.append(name)
+    return names
+
+
+def with_subscription(cmd: list[str], subscription: str | None) -> list[str]:
+    if subscription:
+        return cmd + ["--subscription", subscription]
+    return cmd
+
+
+def vnet_show_command(args: argparse.Namespace) -> list[str]:
+    return with_subscription(
+        [
+            "az",
+            "network",
+            "vnet",
+            "show",
+            "--resource-group",
+            args.resource_group,
+            "--name",
+            args.vnet,
+            "-o",
+            "json",
+        ],
+        args.subscription,
+    )
+
+
+def public_ip_create_command(
+    args: argparse.Namespace, location: str, public_ip_name: str
+) -> list[str]:
+    return with_subscription(
+        [
+            "az",
+            "network",
+            "public-ip",
+            "create",
+            "--resource-group",
+            args.resource_group,
+            "--name",
+            public_ip_name,
+            "--location",
+            location,
+            "--sku",
+            "Standard",
+            "--allocation-method",
+            "Static",
+            "--version",
+            "IPv4",
+            "--idle-timeout",
+            "4",
+            "--ip-tags",
+            "FirstPartyUsage=/NonProd",
+            "--only-show-errors",
+            "--output",
+            "none",
+        ],
+        args.subscription,
+    )
+
+
+def nat_gateway_create_command(
+    args: argparse.Namespace,
+    location: str,
+    nat_name: str,
+    public_ip_name: str,
+) -> list[str]:
+    return with_subscription(
+        [
+            "az",
+            "network",
+            "nat",
+            "gateway",
+            "create",
+            "--resource-group",
+            args.resource_group,
+            "--name",
+            nat_name,
+            "--location",
+            location,
+            "--public-ip-addresses",
+            public_ip_name,
+            "--idle-timeout",
+            "4",
+            "--sku",
+            "Standard",
+            "--only-show-errors",
+            "--output",
+            "none",
+        ],
+        args.subscription,
+    )
+
+
+def subnet_update_command(
+    args: argparse.Namespace, subnet_name: str, nat_name: str
+) -> list[str]:
+    return with_subscription(
+        [
+            "az",
+            "network",
+            "vnet",
+            "subnet",
+            "update",
+            "--resource-group",
+            args.resource_group,
+            "--vnet-name",
+            args.vnet,
+            "--name",
+            subnet_name,
+            "--default-outbound",
+            "false",
+            "--nat-gateway",
+            nat_name,
+            "--only-show-errors",
+            "--output",
+            "none",
+        ],
+        args.subscription,
+    )
+
+
+def public_ip_show_command(
+    args: argparse.Namespace, public_ip_name: str
+) -> list[str]:
+    return with_subscription(
+        [
+            "az",
+            "network",
+            "public-ip",
+            "show",
+            "--resource-group",
+            args.resource_group,
+            "--name",
+            public_ip_name,
+            "--query",
+            "ipAddress",
+            "-o",
+            "tsv",
+        ],
+        args.subscription,
+    )
+
+
+def run_command(
+    cmd: list[str],
+    *,
+    dry_run: bool = False,
+    capture_output: bool = False,
+    echo: bool = True,
+) -> CompletedProcess[str] | None:
+    if echo:
+        print(f"Running: {shlex.join(cmd)}")
+    if dry_run:
+        return None
+    try:
+        return run(cmd, check=True, capture_output=capture_output, text=True)
+    except CalledProcessError as exc:
+        if exc.stdout:
+            sys.stdout.write(exc.stdout)
+        if exc.stderr:
+            sys.stderr.write(exc.stderr)
+        raise
+
+
+def read_vnet(args: argparse.Namespace) -> VNetState:
+    result = run_command(
+        vnet_show_command(args),
+        capture_output=True,
+        echo=args.verbose,
+    )
+    assert result is not None
+    payload = json.loads(result.stdout)
+    subnets = [
+        SubnetState(
+            name=subnet["name"],
+            nat_gateway_id=(subnet.get("natGateway") or {}).get("id"),
+        )
+        for subnet in payload.get("subnets", [])
+    ]
+    return VNetState(
+        resource_id=payload["id"],
+        location=payload["location"],
+        subnets=subnets,
+    )
+
+
+def expected_nat_gateway_id(vnet: VNetState, nat_name: str) -> str:
+    vnet_parent_id = vnet.resource_id.split(
+        "/providers/Microsoft.Network/virtualNetworks/", 1
+    )[0]
+    return f"{vnet_parent_id}/providers/Microsoft.Network/natGateways/{nat_name}"
+
+
+def target_subnet_names(
+    args: argparse.Namespace,
+    explicit_subnet_names: list[str],
+    vnet: VNetState | None,
+) -> list[str]:
+    if vnet is None:
+        if not explicit_subnet_names:
+            raise SystemExit("--subnet is required when the VNet is not queried")
+        return explicit_subnet_names
+
+    known_subnets = {subnet.name.lower(): subnet for subnet in vnet.subnets}
+    if explicit_subnet_names:
+        missing = [
+            name for name in explicit_subnet_names if name.lower() not in known_subnets
+        ]
+        if missing:
+            raise SystemExit(
+                "Subnet(s) not found in VNet "
+                f"{args.vnet}: {', '.join(sorted(missing))}"
+            )
+        return explicit_subnet_names
+
+    selected: list[str] = []
+    skipped: list[str] = []
+    for subnet in vnet.subnets:
+        if (
+            subnet.name.lower() in RESERVED_SUBNET_NAMES
+            and not args.include_reserved_subnets
+        ):
+            skipped.append(subnet.name)
+            continue
+        selected.append(subnet.name)
+
+    if skipped:
+        print(
+            "Skipping reserved subnet(s): "
+            + ", ".join(sorted(skipped))
+            + ". Pass --include-reserved-subnets to include them.",
+            file=sys.stderr,
+        )
+    if not selected:
+        raise SystemExit(
+            "No target subnets found. Pass --subnet to choose a subnet explicitly."
+        )
+    return selected
+
+
+def validate_nat_gateway_conflicts(
+    args: argparse.Namespace,
+    vnet: VNetState | None,
+    subnet_names: list[str],
+    nat_name: str,
+) -> None:
+    if vnet is None or args.replace_existing_nat:
+        return
+
+    expected_nat_id = expected_nat_gateway_id(vnet, nat_name).lower()
+    subnets_by_name = {subnet.name.lower(): subnet for subnet in vnet.subnets}
+    conflicts = []
+    for subnet_name in subnet_names:
+        subnet = subnets_by_name[subnet_name.lower()]
+        nat_gateway_id = subnet.nat_gateway_id
+        if nat_gateway_id and nat_gateway_id.lower() != expected_nat_id:
+            conflicts.append(f"{subnet.name}: {nat_gateway_id}")
+
+    if conflicts:
+        raise SystemExit(
+            "Refusing to replace existing NAT gateway association(s):\n"
+            + "\n".join(conflicts)
+            + "\nPass --replace-existing-nat to replace them."
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    explicit_subnet_names = parse_subnet_names(args.subnet)
+    needs_vnet_lookup = (
+        not args.dry_run or args.location is None or not explicit_subnet_names
+    )
+    vnet = read_vnet(args) if needs_vnet_lookup else None
+    location = args.location or (vnet.location if vnet is not None else None)
+    if location is None:
+        raise SystemExit("--location is required when the VNet is not queried")
+
+    nat_name = args.nat_name or nat_gateway_name_for_vnet(args.vnet)
+    public_ip_name = args.public_ip_name or nat_public_ip_name_for_vnet(args.vnet)
+    subnet_names = target_subnet_names(args, explicit_subnet_names, vnet)
+    validate_nat_gateway_conflicts(args, vnet, subnet_names, nat_name)
+
+    print(f"Target subnets: {', '.join(subnet_names)}")
+    mutating_commands = [
+        public_ip_create_command(args, location, public_ip_name),
+        nat_gateway_create_command(args, location, nat_name, public_ip_name),
+        *[
+            subnet_update_command(args, subnet_name, nat_name)
+            for subnet_name in subnet_names
+        ],
+    ]
+    for cmd in mutating_commands:
+        run_command(cmd, dry_run=args.dry_run, capture_output=True)
+
+    show_ip_command = public_ip_show_command(args, public_ip_name)
+    if args.dry_run:
+        run_command(show_ip_command, dry_run=True)
+    else:
+        result = run_command(show_ip_command, capture_output=True)
+        assert result is not None
+        public_ip = result.stdout.strip()
+        print(f"Outbound public IP: {public_ip or '(not assigned yet)'}")
+
+    print(
+        "Note: existing VMs in updated subnets may need to be stopped and "
+        "deallocated before Azure clears their NIC-level default outbound state."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

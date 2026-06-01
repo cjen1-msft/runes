@@ -26,6 +26,37 @@ This creates a resource group `my-rg-mycluster`, deploys 3 container groups
 each with a VNet, NAT gateway, and load balancer, then prints the SSH
 commands and public/private IP mappings.
 
+### Update an existing VNet for explicit outbound
+
+Use `update-vnet-outbound` to make existing subnets private and attach a NAT
+gateway with a static outbound public IP:
+
+```bash
+./deploy-aci-arm/update-vnet-outbound \
+  --resource-group my-rg \
+  --vnet mycluster-vnet \
+  --subnet default
+```
+
+The script creates a Standard static public IP and NAT gateway using the same
+`<deployment>-nat-ip` / `<deployment>-nat` naming convention as `deploy-aci`
+for VNets named `<deployment>-vnet`, then runs `az network vnet subnet update`
+with `--default-outbound false` and `--nat-gateway`. If no `--subnet` is
+provided, it targets all non-reserved subnets in the VNet. Existing VMs in
+updated subnets may need to be stopped and deallocated before Azure clears their
+NIC-level default outbound state.
+
+Preview without mutating Azure resources:
+
+```bash
+./deploy-aci-arm/update-vnet-outbound \
+  --resource-group my-rg \
+  --vnet mycluster-vnet \
+  --location northeurope \
+  --subnet default \
+  --dry-run
+```
+
 ### Parameters
 
 | Flag | Default | Description |

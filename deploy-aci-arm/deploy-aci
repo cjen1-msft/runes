@@ -25,6 +25,8 @@ from utils import (
     load_balancer_backend_address_name,
     load_balancer_name,
     load_balancer_public_ip_name,
+    nat_gateway_name_for_vnet,
+    nat_public_ip_name_for_vnet,
     new_vnet_with_nat,
     ssh_private_key_path,
     storage_account_kind_for_azure_file_sku,
@@ -43,8 +45,12 @@ def build_actions(args) -> list[DeploymentAction]:
 
     build_context["vnet_name"] = f"{args.name}-vnet"
     build_context["subnet_name"] = "default"
-    build_context["nat_name"] = f"{args.name}-nat"
-    build_context["nat_ip_name"] = f"{args.name}-nat-ip"
+    build_context["nat_name"] = nat_gateway_name_for_vnet(
+        build_context["vnet_name"]
+    )
+    build_context["nat_ip_name"] = nat_public_ip_name_for_vnet(
+        build_context["vnet_name"]
+    )
 
     ports = []
     for p in (args.tcp_ports or "").split(","):
